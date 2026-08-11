@@ -19,6 +19,7 @@ regex = "1"
 toml = "0.8"
 anyhow = "1"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
+fs2 = "0.4.3"
 
 # Optimize hard for a small, low-memory always-on daemon.
 [profile.release]

@@ -55,6 +55,14 @@ fn plist_contents(exe: &str, log: &str) -> String {
 
 /// Install (or refresh) the LaunchAgent plist and load it so capture runs in the background.
 pub fn start() -> Result<()> {
+    // When no LaunchAgent is loaded, a foreground observer may own the lock.
+    // Refuse to load a KeepAlive agent that would otherwise repeatedly restart
+    // and contend for the same transcript files.
+    let already_loaded = is_loaded();
+    if !already_loaded {
+        crate::singleton::ensure_available()?;
+    }
+
     let exe = std::env::current_exe()
         .context("resolve current executable path")?
         .to_string_lossy()
@@ -70,7 +78,7 @@ pub fn start() -> Result<()> {
 
     // Only unload when something is actually loaded; unloading a label that
     // isn't registered makes launchctl print a confusing I/O error.
-    if is_loaded() {
+    if already_loaded {
         let _ = Command::new("launchctl")
             .arg("unload")
             .arg(&plist)

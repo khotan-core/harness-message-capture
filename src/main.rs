@@ -6,6 +6,7 @@ mod reader;
 mod receiver;
 mod record;
 mod redact;
+mod singleton;
 mod sources;
 mod spool;
 mod store;
@@ -211,6 +212,7 @@ fn status() -> Result<()> {
 
 /// Single pass: capture new lines, spool them, drain the spool. Handy for tests.
 fn run_once() -> Result<()> {
+    let _lock = singleton::acquire()?;
     let cfg = Config::load()?;
     let srcs = sources::discover();
     let mut offsets = Offsets::load();
@@ -226,6 +228,7 @@ fn run_once() -> Result<()> {
 const IDLE_HEARTBEAT: Duration = Duration::from_secs(300);
 
 fn watch() -> Result<()> {
+    let _lock = singleton::acquire()?;
     let started = std::time::Instant::now();
     let cfg = Config::load()?;
     let srcs = sources::discover();

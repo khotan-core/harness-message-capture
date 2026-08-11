@@ -100,7 +100,8 @@ pub fn banner(endpoint: &str, device: &str, sources: &[&str], files: usize, read
     eprintln!();
 }
 
-/// One activity line: what was captured, what got delivered, what's queued.
+/// One activity line: what was captured, what got delivered, and any delivery
+/// backlog. A healthy empty queue is intentionally omitted.
 /// `threads` is an optional workspace/chat label summary (e.g. `harness-message-capture`).
 pub fn activity(
     captured: usize,
@@ -124,16 +125,15 @@ pub fn activity(
             uploaded.if_supports_color(Stderr, |t| t.cyan()),
         ));
     }
-    // A non-empty spool is the thing worth noticing, so let it stand out.
-    parts.push(if spool > 0 {
-        format!(
+    // A backlog only matters when delivery could not complete; don't clutter
+    // healthy capture lines with an implementation detail.
+    if spool > 0 {
+        parts.push(format!(
             "{} {}",
-            "spool".if_supports_color(Stderr, |t| t.dimmed()),
+            "queued".if_supports_color(Stderr, |t| t.dimmed()),
             spool.if_supports_color(Stderr, |t| t.yellow()),
-        )
-    } else {
-        format!("{} {}", dim("spool"), dim("0"))
-    });
+        ));
+    }
     if let Some(t) = threads.filter(|s| !s.is_empty()) {
         parts.push(t.if_supports_color(Stderr, |s| s.magenta()).to_string());
     }
@@ -149,14 +149,13 @@ pub fn activity(
 }
 
 /// Periodic proof-of-life while nothing is being written.
-pub fn idle(files: usize, spool: usize) {
+pub fn idle(files: usize, _spool: usize) {
     eprintln!(
         "  {}   {}",
         dim(&clock()),
         dim(&format!(
-            "idle · watching {} files · spool {}",
+            "idle · watching {} files",
             thousands(files),
-            spool
         )),
     );
 }

@@ -43,6 +43,11 @@ khotan-observer receive --token qa-token
 khotan-observer read --tool cursor --limit 20
 ```
 
+Only one observer can run at a time. `run`, `run-once`, and `start` use a
+process lock, so a foreground observer cannot overlap with the background
+LaunchAgent. The lock is released automatically if the process exits or
+crashes.
+
 Running in the foreground shows what it's doing:
 
 ```
@@ -55,21 +60,21 @@ Running in the foreground shows what it's doing:
 
   ✓ Watching in 3ms  · Ctrl-C to stop
 
-  15:53:05   captured 12   uploaded 12   spool 0   harness-message-capture
-  15:58:05   idle · watching 3,952 files · spool 0
+  15:53:05   captured 12   uploaded 12   harness-message-capture
+  15:58:05   idle · watching 3,952 files
 ```
 
 When several workspaces contribute in one pass, labels are listed with counts:
 
 ```
-  16:30:09   captured 13   uploaded 13   spool 0   harness-message-capture×10, khotan×3
+  16:30:09   captured 13   uploaded 13   harness-message-capture×10, khotan×3
 ```
 
 If the endpoint is unreachable, nothing is lost — records queue on disk and
 the line tells you so:
 
 ```
-  15:52:47   captured 5   spool 531   ⚠ endpoint unreachable (connection refused) — retrying
+  15:52:47   captured 5   queued 531   ⚠ endpoint unreachable (connection refused) — retrying
 ```
 
 Background mode writes the same log to
