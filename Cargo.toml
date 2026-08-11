@@ -1,0 +1,28 @@
+[package]
+name = "harness-message-capture"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny background daemon that captures local AI coding-agent transcripts and ships them to a remote endpoint."
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "hmc"
+path = "src/main.rs"
+
+[dependencies]
+notify = "6"
+ureq = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+toml = "0.8"
+anyhow = "1"
+
+# Optimize hard for a small, low-memory always-on daemon.
+[profile.release]
+opt-level = "z"      # optimize for size
+lto = true           # link-time optimization
+codegen-units = 1    # better optimization at the cost of compile time
+panic = "abort"      # no unwinding machinery
+strip = true         # strip symbols from the binary
