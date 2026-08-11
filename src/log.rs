@@ -1,9 +1,8 @@
 use crate::record::now_ms;
-use std::io::IsTerminal;
+use owo_colors::{OwoColorize, Stream::Stderr};
 use std::sync::OnceLock;
 
 static OFFSET: OnceLock<i64> = OnceLock::new();
-static COLOR: OnceLock<bool> = OnceLock::new();
 
 /// Local UTC offset in seconds, resolved once via `date +%z` so timestamps read
 /// as wall-clock time without pulling in a date/time crate.
@@ -40,35 +39,39 @@ pub fn clock() -> String {
     format!("{:02}:{:02}:{:02}", day / 3600, (day % 3600) / 60, day % 60)
 }
 
-fn use_color() -> bool {
-    *COLOR.get_or_init(|| std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none())
+/// Group digits so large file counts stay readable (e.g. `3,950`).
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
-fn paint(code: &str, s: &str) -> String {
-    if use_color() {
-        format!("\x1b[{code}m{s}\x1b[0m")
-    } else {
-        s.to_string()
-    }
+pub fn green(s: &str) -> String {
+    s.if_supports_color(Stderr, |t| t.green()).to_string()
 }
 
 pub fn dim(s: &str) -> String {
-    paint("2", s)
-}
-pub fn bold(s: &str) -> String {
-    paint("1", s)
-}
-pub fn green(s: &str) -> String {
-    paint("32", s)
-}
-pub fn yellow(s: &str) -> String {
-    paint("33", s)
-}
-pub fn magenta(s: &str) -> String {
-    paint("35", s)
+    s.if_supports_color(Stderr, |t| t.dimmed()).to_string()
 }
 
-/// Startup banner, in the spirit of a dev-server boot summary.
+/// A `label   value` line in the startup summary. The label is padded before
+/// styling so ANSI codes never throw the column alignment off.
+fn row(label: &str, value: &str) {
+    let padded = format!("{label:<9}");
+    eprintln!(
+        "    {}  {}",
+        padded.if_supports_color(Stderr, |t| t.dimmed()),
+        value
+    );
+}
+
+/// Startup summary printed once when the watcher comes up.
 pub fn banner(endpoint: &str, device: &str, sources: &[&str], files: usize, ready_ms: u128) {
     let version = env!("CARGO_PKG_VERSION");
     let src = if sources.is_empty() {
@@ -78,38 +81,59 @@ pub fn banner(endpoint: &str, device: &str, sources: &[&str], files: usize, read
     };
     eprintln!();
     eprintln!(
-        "  {} {} {}",
-        magenta("▲"),
-        bold("khotan-observer"),
-        dim(version)
+        "  {}  {}",
+        "khotan-observer".if_supports_color(Stderr, |t| t.bold()),
+        version.if_supports_color(Stderr, |t| t.dimmed()),
     );
-    eprintln!("  {} Endpoint:   {}", dim("-"), endpoint);
-    eprintln!("  {} Device:     {}", dim("-"), device);
-    eprintln!("  {} Sources:    {}", dim("-"), src);
-    eprintln!("  {} Tracking:   {} transcript files", dim("-"), files);
+    eprintln!();
+    row("Endpoint", endpoint);
+    row("Device", device);
+    row("Sources", &src);
+    row("Tracking", &format!("{} transcript files", thousands(files)));
     eprintln!();
     eprintln!(
-        "  {} Watching in {}",
-        green("✓"),
-        dim(&format!("{ready_ms}ms"))
+        "  {} Watching in {}  {}",
+        "✓".if_supports_color(Stderr, |t| t.green()),
+        format!("{ready_ms}ms").if_supports_color(Stderr, |t| t.dimmed()),
+        "· Ctrl-C to stop".if_supports_color(Stderr, |t| t.dimmed()),
     );
-    eprintln!("  {}", dim("Ctrl-C to stop"));
     eprintln!();
 }
 
 /// One activity line: what was captured, what got delivered, what's queued.
 pub fn activity(captured: usize, uploaded: usize, spool: usize, warn: Option<&str>) {
-    let mut parts = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
     if captured > 0 {
-        parts.push(green(&format!("captured {captured}")));
+        parts.push(format!(
+            "{} {}",
+            "captured".if_supports_color(Stderr, |t| t.dimmed()),
+            captured.if_supports_color(Stderr, |t| t.green()),
+        ));
     }
     if uploaded > 0 {
-        parts.push(format!("uploaded {uploaded}"));
+        parts.push(format!(
+            "{} {}",
+            "uploaded".if_supports_color(Stderr, |t| t.dimmed()),
+            uploaded.if_supports_color(Stderr, |t| t.cyan()),
+        ));
     }
-    parts.push(dim(&format!("spool {spool}")));
-    let mut line = format!("  {}  {}", dim(&clock()), parts.join("   "));
+    // A non-empty spool is the thing worth noticing, so let it stand out.
+    parts.push(if spool > 0 {
+        format!(
+            "{} {}",
+            "spool".if_supports_color(Stderr, |t| t.dimmed()),
+            spool.if_supports_color(Stderr, |t| t.yellow()),
+        )
+    } else {
+        format!("{} {}", dim("spool"), dim("0"))
+    });
+
+    let mut line = format!("  {}   {}", dim(&clock()), parts.join("   "));
     if let Some(w) = warn {
-        line.push_str(&format!("   {}", yellow(&format!("⚠ {w}"))));
+        line.push_str(&format!(
+            "   {}",
+            format!("⚠ {w}").if_supports_color(Stderr, |t| t.yellow())
+        ));
     }
     eprintln!("{line}");
 }
@@ -117,19 +141,27 @@ pub fn activity(captured: usize, uploaded: usize, spool: usize, warn: Option<&st
 /// Periodic proof-of-life while nothing is being written.
 pub fn idle(files: usize, spool: usize) {
     eprintln!(
-        "  {}  {}",
+        "  {}   {}",
         dim(&clock()),
-        dim(&format!("idle — watching {files} files, spool {spool}"))
+        dim(&format!(
+            "idle · watching {} files · spool {}",
+            thousands(files),
+            spool
+        )),
     );
 }
 
 pub fn warn(msg: &str) {
-    eprintln!("  {}  {}", dim(&clock()), yellow(&format!("⚠ {msg}")));
+    eprintln!(
+        "  {}   {}",
+        dim(&clock()),
+        format!("⚠ {msg}").if_supports_color(Stderr, |t| t.yellow())
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_offset;
+    use super::{parse_offset, thousands};
 
     #[test]
     fn parses_positive_offset() {
@@ -145,5 +177,13 @@ mod tests {
     fn rejects_garbage() {
         assert_eq!(parse_offset("nope"), None);
         assert_eq!(parse_offset(""), None);
+    }
+
+    #[test]
+    fn groups_thousands() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(950), "950");
+        assert_eq!(thousands(3_950), "3,950");
+        assert_eq!(thousands(1_234_567), "1,234,567");
     }
 }

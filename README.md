@@ -42,24 +42,24 @@ khotan-observer uninstall
 Running in the foreground shows what it's doing:
 
 ```
-  ▲ khotan-observer 0.1.1
-  - Endpoint:   https://ingest.example.com/ingest
-  - Device:     3f88991f7ee379a1589ab29795e43b0c
-  - Sources:    claude, codex, cursor
-  - Tracking:   3949 transcript files
+  khotan-observer  0.1.3
 
-  ✓ Watching in 5ms
-  Ctrl-C to stop
+    Endpoint   https://ingest.example.com/ingest
+    Device     3f88991f7ee379a1589ab29795e43b0c
+    Sources    claude, codex, cursor
+    Tracking   3,952 transcript files
 
-  15:53:05  captured 12   uploaded 12   spool 0
-  15:58:05  idle — watching 3949 files, spool 0
+  ✓ Watching in 3ms  · Ctrl-C to stop
+
+  15:53:05   captured 12   uploaded 12   spool 0
+  15:58:05   idle · watching 3,952 files · spool 0
 ```
 
 If the endpoint is unreachable, nothing is lost — records queue on disk and
 the line tells you so:
 
 ```
-  15:52:47  captured 5   spool 531   ⚠ endpoint unreachable (connection refused) — retrying
+  15:52:47   captured 5   spool 531   ⚠ endpoint unreachable (connection refused) — retrying
 ```
 
 Background mode writes the same log to
