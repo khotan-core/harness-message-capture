@@ -1,6 +1,7 @@
 mod agent;
 mod capture;
 mod config;
+mod log;
 mod record;
 mod redact;
 mod sources;
@@ -32,6 +33,7 @@ fn run() -> Result<()> {
         "start" => agent::start(),
         "stop" => agent::stop(),
         "uninstall" => agent::uninstall(),
+        "logs" => agent::logs(!args.iter().any(|a| a == "--no-follow")),
         "run-once" => run_once(),
         "status" => status(),
         _ => {
@@ -50,6 +52,7 @@ fn print_help() {
            khotan-observer run          Capture in the foreground (Ctrl-C to stop)\n\
            khotan-observer start        Install & start the background LaunchAgent\n\
            khotan-observer stop         Stop the background LaunchAgent\n\
+           khotan-observer logs         Follow the background log\n\
            khotan-observer uninstall    Stop & remove the LaunchAgent\n\
            khotan-observer status       Show config, sources, and spool state\n\
            khotan-observer run-once     Single scan + upload pass, then exit\n"
@@ -177,12 +180,13 @@ fn status() -> Result<()> {
     println!("device_id: {}", cfg.device_id);
     println!("poll_secs: {}", cfg.poll_secs);
     println!("batch    : {}", cfg.batch);
+    let running = agent::is_loaded();
     println!(
         "background: {}",
-        if agent::is_loaded() {
-            "running"
+        if running {
+            log::green("running")
         } else {
-            "stopped"
+            log::dim("stopped")
         }
     );
     println!("log file : {}", agent::log_file().display());
@@ -202,11 +206,18 @@ fn run_once() -> Result<()> {
     let srcs = sources::discover();
     let mut offsets = Offsets::load();
     let spool = Spool::open();
-    scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
+    let pass = scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
+    if !report(pass, &spool) {
+        log::activity(0, 0, spool.pending(), Some("nothing new to capture"));
+    }
     Ok(())
 }
 
+/// How long the loop may sit quiet before printing proof-of-life.
+const IDLE_HEARTBEAT: Duration = Duration::from_secs(300);
+
 fn watch() -> Result<()> {
+    let started = std::time::Instant::now();
     let cfg = Config::load()?;
     let srcs = sources::discover();
     let mut offsets = Offsets::load();
@@ -222,67 +233,116 @@ fn watch() -> Result<()> {
         // Best-effort: a missing/again-permissioned dir shouldn't kill the daemon.
         let _ = watcher.watch(&s.root, RecursiveMode::Recursive);
     }
-    eprintln!(
-        "khotan-observer run: {} source(s), poll every {}s",
-        srcs.len(),
-        cfg.poll_secs
+
+    let tools: Vec<&str> = srcs.iter().map(|s| s.tool).collect();
+    log::banner(
+        &cfg.endpoint,
+        &cfg.device_id,
+        &tools,
+        offsets.len(),
+        started.elapsed().as_millis(),
     );
+    if srcs.is_empty() {
+        log::warn("no coding-agent transcript directories found — nothing to capture");
+    }
 
     // Catch up on anything appended while we were stopped.
-    scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
+    report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool), &spool);
 
+    let mut last_output = std::time::Instant::now();
     loop {
         match rx.recv_timeout(Duration::from_secs(cfg.poll_secs)) {
             Ok(_evt) => {
                 // Debounce a burst of writes, then coalesce into one scan.
                 std::thread::sleep(Duration::from_millis(300));
                 while rx.try_recv().is_ok() {}
-                scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
+                if report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool), &spool) {
+                    last_output = std::time::Instant::now();
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Fallback pass: covers missed events and retries the spool.
-                scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
+                if report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool), &spool) {
+                    last_output = std::time::Instant::now();
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if last_output.elapsed() >= IDLE_HEARTBEAT {
+            log::idle(offsets.len(), spool.pending());
+            last_output = std::time::Instant::now();
         }
     }
     Ok(())
 }
 
-fn scan_and_ship(cfg: &Config, srcs: &[sources::Source], offsets: &mut Offsets, spool: &Spool) {
+/// Outcome of one capture + upload pass.
+#[derive(Default)]
+struct Pass {
+    captured: usize,
+    uploaded: usize,
+    warn: Option<String>,
+}
+
+/// Print a line for any pass that did something. Returns whether it printed.
+fn report(pass: Pass, spool: &Spool) -> bool {
+    if pass.captured == 0 && pass.uploaded == 0 && pass.warn.is_none() {
+        return false;
+    }
+    log::activity(
+        pass.captured,
+        pass.uploaded,
+        spool.pending(),
+        pass.warn.as_deref(),
+    );
+    true
+}
+
+fn scan_and_ship(
+    cfg: &Config,
+    srcs: &[sources::Source],
+    offsets: &mut Offsets,
+    spool: &Spool,
+) -> Pass {
+    let mut pass = Pass::default();
     let records = capture::collect_new(srcs, offsets);
     if !records.is_empty() {
         if let Err(e) = spool.append(&records) {
-            eprintln!("khotan-observer: spool append failed: {e:#}");
-            return; // don't advance offsets if we couldn't persist
+            pass.warn = Some(format!("could not write to spool: {e}"));
+            return pass; // don't advance offsets if we couldn't persist
         }
+        pass.captured = records.len();
         if let Err(e) = offsets.save() {
-            eprintln!("khotan-observer: offsets save failed: {e:#}");
+            pass.warn = Some(format!("could not save offsets: {e}"));
         }
     }
-    drain(cfg, spool);
+    let (uploaded, warn) = drain(cfg, spool);
+    pass.uploaded = uploaded;
+    pass.warn = pass.warn.or(warn);
+    pass
 }
 
-fn drain(cfg: &Config, spool: &Spool) {
+/// Ship spooled records until the spool is empty or the endpoint pushes back.
+fn drain(cfg: &Config, spool: &Spool) -> (usize, Option<String>) {
+    let mut uploaded = 0;
     loop {
         let batch = spool.peek(cfg.batch);
         if batch.is_empty() {
-            return;
+            return (uploaded, None);
         }
         match uploader::send(cfg, &batch) {
             uploader::Upload::Ok => {
                 let _ = spool.drop_front(batch.len());
+                uploaded += batch.len();
             }
-            uploader::Upload::Drop => {
-                eprintln!(
-                    "khotan-observer: server rejected {} record(s), dropping",
-                    batch.len()
-                );
-                let _ = spool.drop_front(batch.len());
+            uploader::Upload::Drop(reason) => {
+                let n = batch.len();
+                let _ = spool.drop_front(n);
+                return (uploaded, Some(format!("dropped {n} record(s): {reason}")));
             }
-            uploader::Upload::Retry => {
+            uploader::Upload::Retry(reason) => {
                 // Leave everything spooled; try again on the next pass.
-                return;
+                return (uploaded, Some(format!("{reason} — retrying")));
             }
         }
     }

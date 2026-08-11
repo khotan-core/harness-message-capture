@@ -68,20 +68,29 @@ pub fn start() -> Result<()> {
     }
     fs::write(&plist, plist_contents(&exe, &log_path().to_string_lossy()))?;
 
-    // Reload if already present, then load.
-    let _ = Command::new("launchctl").arg("unload").arg(&plist).status();
-    let status = Command::new("launchctl")
+    // Only unload when something is actually loaded; unloading a label that
+    // isn't registered makes launchctl print a confusing I/O error.
+    if is_loaded() {
+        let _ = Command::new("launchctl")
+            .arg("unload")
+            .arg(&plist)
+            .output();
+    }
+    let out = Command::new("launchctl")
         .arg("load")
         .arg("-w")
         .arg(&plist)
-        .status()
+        .output()
         .context("run launchctl load")?;
-    if !status.success() {
-        anyhow::bail!("launchctl load failed for {}", plist.display());
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("launchctl load failed for {}: {}", plist.display(), err.trim());
     }
-    println!("started background observer");
-    println!("plist: {}", plist.display());
-    println!("logs:  {}", log_path().display());
+    println!("{} background observer running", crate::log::green("✓"));
+    println!("  logs:   khotan-observer logs");
+    println!("  status: khotan-observer status");
+    println!("  stop:   khotan-observer stop");
+    println!("  file:   {}", log_path().display());
     Ok(())
 }
 
@@ -92,16 +101,35 @@ pub fn stop() -> Result<()> {
         println!("observer is not installed (no LaunchAgent at {})", plist.display());
         return Ok(());
     }
-    let status = Command::new("launchctl")
+    if !is_loaded() {
+        println!("background observer is already stopped");
+        return Ok(());
+    }
+    let _ = Command::new("launchctl")
         .arg("unload")
         .arg(&plist)
-        .status()
+        .output()
         .context("run launchctl unload")?;
-    if !status.success() {
-        // Already unloaded is fine — launchctl may exit non-zero.
-        eprintln!("note: launchctl unload returned {}", status);
-    }
     println!("stopped background observer");
+    Ok(())
+}
+
+/// Stream the background log, like `tail -f`.
+pub fn logs(follow: bool) -> Result<()> {
+    let log = log_path();
+    if !log.exists() {
+        anyhow::bail!(
+            "no log yet at {} — run `khotan-observer start` first",
+            log.display()
+        );
+    }
+    let mut cmd = Command::new("tail");
+    cmd.arg("-n").arg("80");
+    if follow {
+        cmd.arg("-f");
+    }
+    cmd.arg(&log);
+    cmd.status().context("run tail")?;
     Ok(())
 }
 
