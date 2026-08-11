@@ -43,6 +43,7 @@ fn run() -> Result<()> {
         "status" => status(),
         "receive" => receive_cmd(&args[2..]),
         "read" => read_cmd(&args[2..]),
+        "clear-queue" => clear_queue(&args[2..]),
         _ => {
             print_help();
             Ok(())
@@ -64,7 +65,8 @@ fn print_help() {
            khotan-observer status       Show config, sources, and spool state\n\
            khotan-observer run-once     Single scan + upload pass, then exit\n\
            khotan-observer receive      Local ingest server (writes to an inbox dir)\n\
-           khotan-observer read         Inspect messages stored in the inbox\n"
+           khotan-observer read         Inspect messages stored in the inbox\n\
+           khotan-observer clear-queue --yes  Permanently discard queued records\n"
     );
 }
 
@@ -501,6 +503,19 @@ fn read_cmd(args: &[String]) -> Result<()> {
     })
 }
 
+/// Permanently discard records that have not yet reached the ingest endpoint.
+fn clear_queue(args: &[String]) -> Result<()> {
+    if args != ["--yes"] {
+        anyhow::bail!(
+            "refusing to discard queued records; rerun with `khotan-observer clear-queue --yes`"
+        );
+    }
+    let _lock = singleton::acquire()?;
+    let count = Spool::open().clear()?;
+    println!("cleared {count} queued record(s)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +602,11 @@ mod tests {
         assert_eq!(parsed.session.as_deref(), Some("abc"));
         assert_eq!(parsed.limit, 10);
         assert!(parsed.raw);
+    }
+
+    #[test]
+    fn clear_queue_requires_explicit_confirmation() {
+        let err = clear_queue(&s(&[])).unwrap_err();
+        assert!(err.to_string().contains("--yes"));
     }
 }

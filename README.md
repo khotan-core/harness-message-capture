@@ -37,6 +37,7 @@ khotan-observer logs      # follow background activity
 khotan-observer status
 khotan-observer stop
 khotan-observer uninstall
+khotan-observer clear-queue --yes  # permanently discard unsent records
 
 # Local proof sink (optional): receive into a directory, then inspect.
 khotan-observer receive --token qa-token
@@ -47,6 +48,9 @@ Only one observer can run at a time. `run`, `run-once`, and `start` use a
 process lock, so a foreground observer cannot overlap with the background
 LaunchAgent. The lock is released automatically if the process exits or
 crashes.
+
+`clear-queue --yes` only discards records waiting in the local delivery queue.
+It does not delete the original AI-tool transcripts or reset their offsets.
 
 Running in the foreground shows what it's doing:
 

@@ -86,4 +86,15 @@ impl Spool {
             })
             .unwrap_or(0)
     }
+
+    /// Permanently discard every record still waiting for delivery.
+    pub fn clear(&self) -> Result<usize> {
+        let count = self.pending();
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(count)
+    }
 }
