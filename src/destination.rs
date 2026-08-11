@@ -3,7 +3,6 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 const ENV_FILE: &str = "env.khotan.local";
@@ -24,17 +23,9 @@ pub struct Credentials {
 }
 
 impl RouteRef {
-    fn new(
-        api_url: String,
-        org_id: String,
-        credential_path: PathBuf,
-        label: String,
-    ) -> RouteRef {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        api_url.hash(&mut hasher);
-        org_id.hash(&mut hasher);
+    fn new(api_url: String, org_id: String, credential_path: PathBuf, label: String) -> RouteRef {
         RouteRef {
-            id: format!("{:016x}", hasher.finish()),
+            id: stable_route_id(&api_url, &org_id),
             org_id,
             api_url,
             credential_path,
@@ -65,18 +56,34 @@ fn find_env_within_repo(start: &Path) -> Result<Option<PathBuf>> {
     } else {
         start.parent().unwrap_or(start).to_path_buf()
     };
+    let mut nearest = None;
     loop {
-        if let Some(path) = select_env_file(&dir)? {
-            return Ok(Some(path));
+        if nearest.is_none() {
+            nearest = select_env_file(&dir)?;
         }
         if dir.join(".git").exists() {
-            return Ok(None);
+            return Ok(nearest);
         }
         let Some(parent) = dir.parent() else {
             return Ok(None);
         };
         dir = parent.to_path_buf();
     }
+}
+
+/// A specified FNV-1a digest keeps queue directory names stable across Rust
+/// versions. Existing route metadata still makes collisions fail closed.
+fn stable_route_id(api_url: &str, org_id: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in api_url
+        .bytes()
+        .chain(std::iter::once(b'\n'))
+        .chain(org_id.bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn select_env_file(dir: &Path) -> Result<Option<PathBuf>> {
@@ -112,9 +119,8 @@ fn route_values(map: &BTreeMap<String, String>) -> [Option<&str>; 3] {
 }
 
 fn load_route(path: &Path) -> Result<RouteRef> {
-    let parsed = parse_env(
-        &fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
-    );
+    let parsed =
+        parse_env(&fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?);
     let api_url = required(&parsed, "KHOTAN_API_URL", path)?;
     let _api_key = required(&parsed, "KHOTAN_API_KEY", path)?;
     let org_id = required(&parsed, "KHOTAN_ORG_ID", path)?;
@@ -124,12 +130,7 @@ fn load_route(path: &Path) -> Result<RouteRef> {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "customer".to_string());
-    Ok(RouteRef::new(
-        api_url,
-        org_id,
-        path.to_path_buf(),
-        label,
-    ))
+    Ok(RouteRef::new(api_url, org_id, path.to_path_buf(), label))
 }
 
 pub fn read_credentials(route: &RouteRef) -> Result<Credentials> {
@@ -156,12 +157,21 @@ pub fn normalize_api_url(raw: &str) -> Result<String> {
     if !(normalized.starts_with("https://") || normalized.starts_with("http://")) {
         bail!("KHOTAN_API_URL must use http or https")
     }
+    if normalized.chars().any(char::is_whitespace) {
+        bail!("KHOTAN_API_URL must not contain whitespace")
+    }
     let authority = normalized
         .split_once("://")
         .map(|(_, rest)| rest)
         .unwrap_or("");
-    if authority.is_empty() || authority.starts_with('/') {
-        bail!("KHOTAN_API_URL has no host")
+    if authority.is_empty()
+        || authority.starts_with('/')
+        || authority.contains('@')
+        || authority.contains('/')
+        || authority.contains('?')
+        || authority.contains('#')
+    {
+        bail!("KHOTAN_API_URL must be an origin without userinfo or a path")
     }
     Ok(normalized)
 }
@@ -221,18 +231,15 @@ mod tests {
     fn write_env(repo: &Path, file: &str, url: &str, key: &str, org: &str) {
         fs::write(
             repo.join(file),
-            format!(
-                "KHOTAN_API_URL='{url}'\nKHOTAN_API_KEY='{key}'\nKHOTAN_ORG_ID='{org}'\n"
-            ),
+            format!("KHOTAN_API_URL='{url}'\nKHOTAN_API_KEY='{key}'\nKHOTAN_ORG_ID='{org}'\n"),
         )
         .unwrap();
     }
 
     #[test]
     fn parses_quotes_and_normalizes_url() {
-        let map = parse_env(
-            "KHOTAN_API_URL='https://customer.example/'\nKHOTAN_ORG_ID=\"org-1\"\n",
-        );
+        let map =
+            parse_env("KHOTAN_API_URL='https://customer.example/'\nKHOTAN_ORG_ID=\"org-1\"\n");
         assert_eq!(map["KHOTAN_ORG_ID"], "org-1");
         assert_eq!(
             normalize_api_url(&map["KHOTAN_API_URL"]).unwrap(),
@@ -241,19 +248,53 @@ mod tests {
     }
 
     #[test]
+    fn route_ids_are_repeatable_and_urls_cannot_embed_secrets_or_paths() {
+        let first = stable_route_id("https://customer.example", "org-1");
+        let second = stable_route_id("https://customer.example", "org-1");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 16);
+        assert!(normalize_api_url("https://user:secret@customer.example").is_err());
+        assert!(normalize_api_url("https://customer.example/api").is_err());
+    }
+
+    #[test]
+    fn env_without_a_git_boundary_is_not_a_destination() {
+        let root = temp_repo("no-git");
+        fs::remove_dir_all(root.join(".git")).unwrap();
+        write_env(&root, ENV_FILE, "https://wrong.example", "key", "wrong");
+        let child = root.join("nested").join("workspace");
+        fs::create_dir_all(&child).unwrap();
+        assert!(resolve(&child).unwrap().is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn resolves_complete_repo_destination() {
         let repo = temp_repo("complete");
-        write_env(
-            &repo,
-            ENV_FILE,
-            "https://customer.example/",
-            "key",
-            "org",
-        );
+        write_env(&repo, ENV_FILE, "https://customer.example/", "key", "org");
         let route = resolve(&repo).unwrap().unwrap();
         assert_eq!(route.api_url, "https://customer.example");
         assert_eq!(route.org_id, "org");
         assert!(!route.id.contains("key"));
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn nearest_nested_destination_wins_within_repo_boundary() {
+        let repo = temp_repo("nested");
+        write_env(&repo, ENV_FILE, "https://root.example", "root", "root-org");
+        let nested = repo.join("packages").join("customer");
+        fs::create_dir_all(&nested).unwrap();
+        write_env(
+            &nested,
+            ENV_FILE,
+            "https://nested.example",
+            "nested",
+            "nested-org",
+        );
+        let route = resolve(&nested).unwrap().unwrap();
+        assert_eq!(route.org_id, "nested-org");
+        assert_eq!(route.credential_path, nested.join(ENV_FILE));
         let _ = fs::remove_dir_all(repo);
     }
 
@@ -273,13 +314,7 @@ mod tests {
     fn rejects_conflicting_dotted_files() {
         let repo = temp_repo("conflict");
         write_env(&repo, ENV_FILE, "https://one.example", "key", "org");
-        write_env(
-            &repo,
-            DOTTED_ENV_FILE,
-            "https://two.example",
-            "key",
-            "org",
-        );
+        write_env(&repo, DOTTED_ENV_FILE, "https://two.example", "key", "org");
         assert!(resolve(&repo).is_err());
         let _ = fs::remove_dir_all(repo);
     }
@@ -294,5 +329,32 @@ mod tests {
         assert_eq!(routes.len(), 1);
         let _ = fs::remove_dir_all(one);
         let _ = fs::remove_dir_all(two);
+    }
+
+    #[test]
+    fn worktree_inherits_primary_repo_destination() {
+        let repo = temp_repo("primary");
+        write_env(&repo, ENV_FILE, "https://customer.example", "key", "org");
+        let parent = repo.parent().unwrap().to_path_buf();
+        let worktree = parent.join(format!(
+            "{}-worktree",
+            repo.file_name().unwrap().to_string_lossy()
+        ));
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(repo.join(".git").join("worktrees").join("branch")).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                repo.join(".git").join("worktrees").join("branch").display()
+            ),
+        )
+        .unwrap();
+
+        let route = resolve(&worktree).unwrap().unwrap();
+        assert_eq!(route.org_id, "org");
+        assert_eq!(route.credential_path, repo.join(ENV_FILE));
+        let _ = fs::remove_dir_all(worktree);
+        let _ = fs::remove_dir_all(repo);
     }
 }

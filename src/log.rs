@@ -40,6 +40,7 @@ pub fn clock() -> String {
 }
 
 /// Group digits so large file counts stay readable (e.g. `3,950`).
+#[allow(clippy::manual_is_multiple_of)]
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -72,13 +73,7 @@ fn row(label: &str, value: &str) {
 }
 
 /// Startup summary printed once when the watcher comes up.
-pub fn banner(
-    device: &str,
-    sources: &[&str],
-    files: usize,
-    routes: usize,
-    ready_ms: u128,
-) {
+pub fn banner(device: &str, sources: &[&str], files: usize, routes: usize, ready_ms: u128) {
     let version = env!("CARGO_PKG_VERSION");
     let src = if sources.is_empty() {
         "none found".to_string()
@@ -95,7 +90,10 @@ pub fn banner(
     row("Device", device);
     row("Sources", &src);
     row("Routes", &format!("{} customer destination(s)", routes));
-    row("Tracking", &format!("{} transcript files", thousands(files)));
+    row(
+        "Tracking",
+        &format!("{} transcript files", thousands(files)),
+    );
     eprintln!();
     eprintln!(
         "  {} Watching in {}  {}",
@@ -167,10 +165,7 @@ pub fn idle(files: usize, _spool: usize) {
     eprintln!(
         "  {}   {}",
         dim(&clock()),
-        dim(&format!(
-            "idle · watching {} files",
-            thousands(files),
-        )),
+        dim(&format!("idle · watching {} files", thousands(files),)),
     );
 }
 

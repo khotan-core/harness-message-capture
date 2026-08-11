@@ -31,8 +31,7 @@ pub fn default_inbox() -> PathBuf {
 pub fn serve(opts: ReceiveOpts) -> Result<()> {
     std::fs::create_dir_all(&opts.dir)
         .with_context(|| format!("create inbox {}", opts.dir.display()))?;
-    let listener = TcpListener::bind(&opts.bind)
-        .with_context(|| format!("bind {}", opts.bind))?;
+    let listener = TcpListener::bind(&opts.bind).with_context(|| format!("bind {}", opts.bind))?;
     eprintln!(
         "  khotan-observer receive\n\
          \n\
@@ -165,7 +164,11 @@ fn handle_connection(mut stream: TcpStream, opts: &ReceiveOpts) -> Result<()> {
             || store::sanitize_segment(&r.project).is_err()
             || store::sanitize_segment(&r.session_id).is_err()
         {
-            respond(&mut stream, 400, &format!("record[{i}] has unsafe path fields"))?;
+            respond(
+                &mut stream,
+                400,
+                &format!("record[{i}] has unsafe path fields"),
+            )?;
             return Ok(());
         }
     }
@@ -259,11 +262,7 @@ mod tests {
         let handle = thread::spawn(move || {
             ready_tx.send(()).unwrap();
             if let Ok((stream, _)) = listener.accept() {
-                let opts = ReceiveOpts {
-                    bind,
-                    dir,
-                    token,
-                };
+                let opts = ReceiveOpts { bind, dir, token };
                 let _ = handle_connection(stream, &opts);
             }
         });
@@ -309,7 +308,8 @@ mod tests {
             project: "proj".into(),
             session_id: "s1".into(),
             captured_at_ms: 42,
-            line: r#"{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}"#.into(),
+            line: r#"{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}"#
+                .into(),
         };
         let body = serde_json::json!({
             "device_id": "devabc",

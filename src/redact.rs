@@ -34,6 +34,16 @@ fn patterns() -> &'static Vec<Regex> {
     })
 }
 
+pub fn scrub(line: &str) -> String {
+    let mut out = line.to_string();
+    for re in patterns() {
+        if re.is_match(&out) {
+            out = re.replace_all(&out, "[REDACTED]").into_owned();
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::scrub;
@@ -68,14 +78,4 @@ mod tests {
         let input = "Document how the API key is loaded from the customer repository.";
         assert_eq!(scrub(input), input);
     }
-}
-
-pub fn scrub(line: &str) -> String {
-    let mut out = line.to_string();
-    for re in patterns() {
-        if re.is_match(&out) {
-            out = re.replace_all(&out, "[REDACTED]").into_owned();
-        }
-    }
-    out
 }

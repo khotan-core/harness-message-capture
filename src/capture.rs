@@ -57,8 +57,8 @@ pub struct CapturedFile {
     pub records: Vec<Record>,
     pub offset_key: String,
     pub next_offset: u64,
-    pub project: String,
     pub route_warning: Option<String>,
+    pub advance_unrouted: bool,
 }
 
 /// Read newly-appended complete lines without mutating offsets. The caller
@@ -111,17 +111,23 @@ fn read_file(
         None => return Ok(None), // no complete line yet
     };
 
-    let workspace = workspaces.resolve(src.tool, file, &src.root);
-    let (project, session_id) = provenance(src.tool, file, &src.root, workspace.as_deref());
-    let (route, route_warning) = match workspace.as_deref() {
-        Some(workspace) => match destination::resolve(workspace) {
-            Ok(route) => (route, None),
-            Err(error) => (
-                None,
-                Some(format!("{}: {error}", project)),
-            ),
+    let workspace_result = workspaces.resolve_checked(src.tool, file, &src.root);
+    let workspace = workspace_result
+        .as_ref()
+        .ok()
+        .and_then(|path| path.as_deref());
+    let (project, session_id) = provenance(src.tool, file, &src.root, workspace);
+    let (route, route_warning, advance_unrouted) = match workspace_result {
+        Err(error) => (None, Some(format!("{project}: {error}")), false),
+        Ok(Some(workspace)) => match destination::resolve(&workspace) {
+            Ok(route) => (route, None, true),
+            Err(error) => (None, Some(format!("{}: {error}", project)), false),
         },
-        None => (None, None),
+        Ok(None) => (
+            None,
+            Some(format!("{project}: workspace path could not be resolved")),
+            true,
+        ),
     };
     let mut records = Vec::new();
     let complete = &buf[..=last_nl];
@@ -146,8 +152,8 @@ fn read_file(
         records,
         offset_key: key,
         next_offset: offset + last_nl as u64 + 1,
-        project,
         route_warning,
+        advance_unrouted,
     }))
 }
 
@@ -155,12 +161,7 @@ fn read_file(
 /// `project` is a human-readable workspace/thread label when we can recover one
 /// (e.g. `harness-message-capture` from Cursor's encoded project dir); `session`
 /// is the file stem (usually the chat/session id).
-fn provenance(
-    tool: &str,
-    file: &Path,
-    root: &Path,
-    workspace: Option<&Path>,
-) -> (String, String) {
+fn provenance(tool: &str, file: &Path, root: &Path, workspace: Option<&Path>) -> (String, String) {
     let session = file
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -256,7 +257,21 @@ pub fn thread_summary(records: &[Record]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::{encoded_path, WorkspaceIndex};
+    use std::collections::HashMap;
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hmc-capture-{name}-{stamp}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn humanizes_cursor_developer_slug() {
@@ -305,5 +320,60 @@ mod tests {
             rec("khotan"),
         ]);
         assert_eq!(s, "harness-message-capture×2, khotan");
+    }
+
+    #[test]
+    fn collection_does_not_commit_offset_before_durable_queue() {
+        let temp = temp_dir("offset");
+        let workspace = temp.join("customer");
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        fs::write(
+            workspace.join("env.khotan.local"),
+            "KHOTAN_API_URL='https://customer.example'\nKHOTAN_API_KEY='fake-key'\nKHOTAN_ORG_ID='org-test'\n",
+        )
+        .unwrap();
+        let source_root = temp.join("cursor-projects");
+        let transcript = source_root
+            .join(encoded_path(&workspace, "cursor"))
+            .join("agent-transcripts")
+            .join("session")
+            .join("session.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, "{\"role\":\"user\"}\n").unwrap();
+
+        let offsets = Offsets {
+            map: HashMap::new(),
+            path: temp.join("offsets.json"),
+        };
+        let source = Source {
+            tool: "cursor",
+            root: source_root,
+        };
+        let workspaces = WorkspaceIndex::from_candidates(vec![workspace]);
+        let captured = collect_new(&[source], &offsets, &workspaces);
+
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].route.is_some());
+        assert_eq!(offsets.get(&transcript.to_string_lossy()), 0);
+        assert!(captured[0].next_offset > 0);
+
+        let workspace = workspaces.candidates()[0].clone();
+        fs::write(
+            workspace.join("env.khotan.local"),
+            "KHOTAN_API_URL='https://customer.example'\nKHOTAN_API_KEY='fake-key'\n",
+        )
+        .unwrap();
+        let blocked = collect_new(
+            &[Source {
+                tool: "cursor",
+                root: transcript.ancestors().nth(4).unwrap().to_path_buf(),
+            }],
+            &offsets,
+            &workspaces,
+        );
+        assert_eq!(blocked.len(), 1);
+        assert!(!blocked[0].advance_unrouted);
+        assert!(blocked[0].route_warning.is_some());
+        let _ = fs::remove_dir_all(temp);
     }
 }

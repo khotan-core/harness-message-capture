@@ -44,10 +44,8 @@ fn walk(dir: &PathBuf, depth: usize, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         match entry.file_type() {
             Ok(ft) if ft.is_dir() => walk(&path, depth + 1, out),
-            Ok(ft) if ft.is_file() => {
-                if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                    out.push(path);
-                }
+            Ok(ft) if ft.is_file() && path.extension().map(|e| e == "jsonl").unwrap_or(false) => {
+                out.push(path);
             }
             _ => {}
         }
