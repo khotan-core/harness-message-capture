@@ -66,7 +66,12 @@ pub fn send(device_id: &str, route: &RouteRef, records: &[Record]) -> Upload {
 }
 
 fn verify_org(route: &RouteRef, api_key: &str) -> Upload {
-    let cache_key = format!("{}\n{}", route.api_url, route.org_id);
+    let cache_key = format!(
+        "{}\n{}\n{:016x}",
+        route.api_url,
+        route.org_id,
+        key_fingerprint(api_key)
+    );
     let cache = VERIFIED.get_or_init(|| Mutex::new(HashMap::new()));
     if cache
         .lock()
@@ -87,7 +92,11 @@ fn verify_org(route: &RouteRef, api_key: &str) -> Upload {
         Ok(response) => response,
         Err(error) => return classify_error(error, "identity check"),
     };
-    let principal: Principal = match response.into_json() {
+    let principal: Principal = match response
+        .into_string()
+        .map_err(|error| error.to_string())
+        .and_then(|body| serde_json::from_str(&body).map_err(|error| error.to_string()))
+    {
         Ok(principal) => principal,
         Err(error) => {
             return Upload::Blocked(format!(
@@ -97,10 +106,7 @@ fn verify_org(route: &RouteRef, api_key: &str) -> Upload {
         }
     };
     if principal.organization_id.as_deref() != Some(route.org_id.as_str()) {
-        return Upload::Blocked(format!(
-            "{} organization verification failed",
-            route.label
-        ));
+        return Upload::Blocked(format!("{} organization verification failed", route.label));
     }
     if let Ok(mut verified) = cache.lock() {
         verified.insert(cache_key, Instant::now());
@@ -108,10 +114,16 @@ fn verify_org(route: &RouteRef, api_key: &str) -> Upload {
     Upload::Ok
 }
 
-fn classify_response(
-    response: Result<ureq::Response, ureq::Error>,
-    operation: &str,
-) -> Upload {
+fn key_fingerprint(api_key: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in api_key.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn classify_response(response: Result<ureq::Response, ureq::Error>, operation: &str) -> Upload {
     match response {
         Ok(_) => Upload::Ok,
         Err(error) => classify_error(error, operation),
@@ -244,19 +256,16 @@ mod tests {
 
     #[test]
     fn verifies_org_then_sends_homogeneous_batch_without_secret_body() {
-        let (origin, requests, handle) = spawn_server(vec![
-            (200, r#"{"organizationId":"org-test"}"#),
-            (204, ""),
-        ]);
+        let (origin, requests, handle) =
+            spawn_server(vec![(200, r#"{"organizationId":"org-test"}"#), (204, "")]);
         let (route, env_path) = fixture_route(origin, "org-test");
-        assert!(matches!(
-            send("device", &route, &[record()]),
-            Upload::Ok
-        ));
+        assert!(matches!(send("device", &route, &[record()]), Upload::Ok));
         handle.join().unwrap();
         let requests = requests.lock().unwrap();
         assert!(requests[0].starts_with("GET /api/v1/me "));
-        assert!(requests[0].to_ascii_lowercase().contains("x-api-key: test-secret-key"));
+        assert!(requests[0]
+            .to_ascii_lowercase()
+            .contains("x-api-key: test-secret-key"));
         assert!(requests[1].starts_with("POST /ingest "));
         assert!(requests[1].contains(r#""organization_id":"org-test""#));
         assert!(!requests[1]
@@ -290,5 +299,33 @@ mod tests {
         ));
         handle.join().unwrap();
         let _ = fs::remove_file(env_path);
+    }
+
+    #[test]
+    fn two_customer_origins_receive_only_their_own_records() {
+        let (origin_one, requests_one, handle_one) =
+            spawn_server(vec![(200, r#"{"organizationId":"org-one"}"#), (204, "")]);
+        let (origin_two, requests_two, handle_two) =
+            spawn_server(vec![(200, r#"{"organizationId":"org-two"}"#), (204, "")]);
+        let (route_one, env_one) = fixture_route(origin_one, "org-one");
+        let (route_two, env_two) = fixture_route(origin_two, "org-two");
+        let mut first = record();
+        first.line = "only-customer-one".into();
+        let mut second = record();
+        second.line = "only-customer-two".into();
+
+        assert!(matches!(send("device", &route_one, &[first]), Upload::Ok));
+        assert!(matches!(send("device", &route_two, &[second]), Upload::Ok));
+        handle_one.join().unwrap();
+        handle_two.join().unwrap();
+
+        let one = requests_one.lock().unwrap().join("\n");
+        let two = requests_two.lock().unwrap().join("\n");
+        assert!(one.contains("only-customer-one"));
+        assert!(!one.contains("only-customer-two"));
+        assert!(two.contains("only-customer-two"));
+        assert!(!two.contains("only-customer-one"));
+        let _ = fs::remove_file(env_one);
+        let _ = fs::remove_file(env_two);
     }
 }

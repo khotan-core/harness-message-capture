@@ -35,25 +35,45 @@ impl WorkspaceIndex {
         &self.candidates
     }
 
+    #[cfg(test)]
     pub fn resolve(&self, tool: &str, transcript: &Path, source_root: &Path) -> Option<PathBuf> {
+        self.resolve_checked(tool, transcript, source_root)
+            .ok()
+            .flatten()
+    }
+
+    pub fn resolve_checked(
+        &self,
+        tool: &str,
+        transcript: &Path,
+        source_root: &Path,
+    ) -> Result<Option<PathBuf>, &'static str> {
         if matches!(tool, "claude" | "codex") {
             if let Some(cwd) = transcript_cwd(transcript) {
-                return Some(cwd);
+                return Ok(Some(cwd));
             }
         }
 
         let slug = transcript
             .strip_prefix(source_root)
-            .ok()?
-            .components()
-            .next()?
-            .as_os_str()
-            .to_string_lossy();
+            .ok()
+            .and_then(|path| path.components().next())
+            .map(|component| component.as_os_str().to_string_lossy());
+        let Some(slug) = slug else {
+            return Ok(None);
+        };
 
-        self.candidates
+        let mut matches = self
+            .candidates
             .iter()
-            .find(|candidate| encoded_path(candidate, tool) == slug)
-            .cloned()
+            .filter(|candidate| encoded_path(candidate, tool) == slug);
+        let Some(first) = matches.next().cloned() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            return Err("workspace path encoding matched multiple local directories");
+        }
+        Ok(Some(first))
     }
 }
 
@@ -61,8 +81,7 @@ fn scan_candidates(dir: &Path, depth: usize, out: &mut BTreeSet<PathBuf>) {
     if depth > MAX_SCAN_DEPTH {
         return;
     }
-    let has_env = dir.join("env.khotan.local").is_file()
-        || dir.join(".env.khotan.local").is_file();
+    let has_env = dir.join("env.khotan.local").is_file() || dir.join(".env.khotan.local").is_file();
     let has_git = dir.join(".git").exists();
     if has_env || has_git {
         out.insert(dir.to_path_buf());
@@ -109,8 +128,13 @@ fn transcript_cwd(path: &Path) -> Option<PathBuf> {
         .take(MAX_METADATA_BYTES)
         .read_to_end(&mut bytes)
         .ok()?;
-    for line in bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
-        let value: Value = serde_json::from_slice(line).ok()?;
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
         if let Some(cwd) = find_string_key(&value, "cwd") {
             let path = PathBuf::from(cwd);
             if path.is_absolute() {
@@ -207,10 +231,38 @@ mod tests {
             .join("agent-transcripts")
             .join("session.jsonl");
         let index = WorkspaceIndex::from_candidates(vec![workspace.clone()]);
+        assert_eq!(index.resolve("cursor", &transcript, &root), Some(workspace));
+    }
+
+    #[test]
+    fn ambiguous_cursor_encoding_fails_closed() {
+        let root = PathBuf::from("/Users/a/.cursor/projects");
+        let transcript = root
+            .join("Users-a-foo-bar")
+            .join("agent-transcripts")
+            .join("session.jsonl");
+        let index = WorkspaceIndex::from_candidates(vec![
+            PathBuf::from("/Users/a/foo-bar"),
+            PathBuf::from("/Users/a/foo/bar"),
+        ]);
+        assert_eq!(index.resolve("cursor", &transcript, &root), None);
+        assert!(index.resolve_checked("cursor", &transcript, &root).is_err());
+    }
+
+    #[test]
+    fn malformed_metadata_line_does_not_hide_later_cwd() {
+        let dir = temp_dir("metadata");
+        let transcript = dir.join("session.jsonl");
+        fs::write(
+            &transcript,
+            "not-json\n{\"payload\":{\"cwd\":\"/tmp/customer\"}}\n",
+        )
+        .unwrap();
         assert_eq!(
-            index.resolve("cursor", &transcript, &root),
-            Some(workspace)
+            WorkspaceIndex::default().resolve("codex", &transcript, &dir),
+            Some(PathBuf::from("/tmp/customer"))
         );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

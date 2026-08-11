@@ -24,9 +24,10 @@ pub fn acquire() -> Result<ObserverLock> {
 fn acquire_at(path: &Path) -> Result<ObserverLock> {
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("open observer lock {}", path.display()))?;
 
     file.try_lock_exclusive().map_err(|e| {
@@ -51,10 +52,8 @@ mod tests {
 
     #[test]
     fn rejects_a_second_observer_lock() {
-        let path = std::env::temp_dir().join(format!(
-            "khotan-observer-lock-test-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("khotan-observer-lock-test-{}", std::process::id()));
         let first = acquire_at(&path).unwrap();
         assert!(acquire_at(&path).is_err());
         drop(first);

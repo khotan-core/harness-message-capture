@@ -112,8 +112,7 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
 
 fn configure(args: &[String]) -> Result<()> {
     let parsed = parse_configure_args(args)?;
-    let mut cfg =
-        Config::load().unwrap_or(Config::fresh(config::random_id()?));
+    let mut cfg = Config::load().unwrap_or(Config::fresh(config::random_id()?));
     if let Some(poll) = parsed.poll {
         cfg.poll_secs = poll;
     }
@@ -167,7 +166,11 @@ fn status() -> Result<()> {
     println!("spool pending: {}", spool.pending());
     println!(
         "legacy quarantine: {}",
-        if spool.has_quarantine() { "present" } else { "none" }
+        if spool.has_quarantine() {
+            "present"
+        } else {
+            "none"
+        }
     );
     println!("inbox dir    : {}", receiver::default_inbox().display());
     Ok(())
@@ -324,9 +327,11 @@ fn scan_and_ship(
                 )),
             },
             None => {
-                pass.skipped += file.records.len();
-                offsets.set(file.offset_key, file.next_offset);
-                offsets_changed = true;
+                if file.advance_unrouted {
+                    pass.skipped += file.records.len();
+                    offsets.set(file.offset_key, file.next_offset);
+                    offsets_changed = true;
+                }
             }
         }
     }
@@ -495,7 +500,9 @@ fn parse_read_args(args: &[String]) -> Result<ReadArgs> {
                 i += 2;
             }
             "--limit" => {
-                let raw = args.get(i + 1).context("--limit requires a positive integer")?;
+                let raw = args
+                    .get(i + 1)
+                    .context("--limit requires a positive integer")?;
                 limit = Some(
                     raw.parse::<usize>()
                         .context("--limit requires a positive integer")?,
@@ -577,10 +584,7 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.poll, Some(10));
         assert_eq!(parsed.batch, Some(50));
-        assert_eq!(
-            parsed.search_roots,
-            vec![PathBuf::from("/work/customers")]
-        );
+        assert_eq!(parsed.search_roots, vec![PathBuf::from("/work/customers")]);
     }
 
     #[test]

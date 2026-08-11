@@ -58,10 +58,7 @@ pub fn run(opts: ReadOpts) -> Result<()> {
             }
             None => {
                 let preview = truncate(&r.line, 240);
-                println!(
-                    "  [raw {}/{}] {}",
-                    r.tool, r.session_id, preview
-                );
+                println!("  [raw {}/{}] {}", r.tool, r.session_id, preview);
             }
         }
     }
@@ -76,7 +73,8 @@ pub fn extract_message(line: &str) -> Option<(String, String)> {
 
     // Cursor agent transcripts: {"role":"user"|"assistant","message":{"content":[...]}}
     if let Some(role) = v.get("role").and_then(|r| r.as_str()) {
-        if let Some(text) = message_text(v.get("message")).or_else(|| content_text(v.get("content")))
+        if let Some(text) =
+            message_text(v.get("message")).or_else(|| content_text(v.get("content")))
         {
             if !text.trim().is_empty() {
                 return Some((role.to_string(), text));
@@ -189,12 +187,14 @@ mod tests {
 
     #[test]
     fn extracts_cursor_user_and_assistant() {
-        let user = r#"{"role":"user","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        let user =
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"hello world"}]}}"#;
         let (role, text) = extract_message(user).unwrap();
         assert_eq!(role, "user");
         assert!(text.contains("hello world"));
 
-        let asst = r#"{"role":"assistant","message":{"content":[{"type":"text","text":"hi back"}]}}"#;
+        let asst =
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"hi back"}]}}"#;
         let (role, text) = extract_message(asst).unwrap();
         assert_eq!(role, "assistant");
         assert!(text.contains("hi back"));

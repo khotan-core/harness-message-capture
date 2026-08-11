@@ -68,7 +68,9 @@ pub fn sanitize_segment(raw: &str) -> Result<String> {
     if s == "." || s == ".." {
         bail!("path segment not allowed: {s}");
     }
-    if s.chars().any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))) {
+    if s.chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    {
         // Soften: allow a broader set but still block separators; map unsafe chars.
         let cleaned: String = s
             .chars()
@@ -279,9 +281,9 @@ mod tests {
     fn append_and_dedupe() {
         let root = tmp();
         let rec = sample(r#"{"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}"#);
-        let (w1, s1) = append_batch(&root, "dev1", &[rec.clone()]).unwrap();
+        let (w1, s1) = append_batch(&root, "dev1", std::slice::from_ref(&rec)).unwrap();
         assert_eq!((w1, s1), (1, 0));
-        let (w2, s2) = append_batch(&root, "dev1", &[rec.clone()]).unwrap();
+        let (w2, s2) = append_batch(&root, "dev1", std::slice::from_ref(&rec)).unwrap();
         assert_eq!((w2, s2), (0, 1));
         let listed = list_records(&root, &ReadFilter::default()).unwrap();
         assert_eq!(listed.len(), 1);

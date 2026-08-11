@@ -79,10 +79,7 @@ pub fn start() -> Result<()> {
     // Only unload when something is actually loaded; unloading a label that
     // isn't registered makes launchctl print a confusing I/O error.
     if already_loaded {
-        let _ = Command::new("launchctl")
-            .arg("unload")
-            .arg(&plist)
-            .output();
+        let _ = Command::new("launchctl").arg("unload").arg(&plist).output();
     }
     let out = Command::new("launchctl")
         .arg("load")
@@ -92,7 +89,11 @@ pub fn start() -> Result<()> {
         .context("run launchctl load")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("launchctl load failed for {}: {}", plist.display(), err.trim());
+        anyhow::bail!(
+            "launchctl load failed for {}: {}",
+            plist.display(),
+            err.trim()
+        );
     }
     println!("{} background observer running", crate::log::green("✓"));
     println!("  logs:   khotan-observer logs");
@@ -106,7 +107,10 @@ pub fn start() -> Result<()> {
 pub fn stop() -> Result<()> {
     let plist = plist_path();
     if !plist.exists() {
-        println!("observer is not installed (no LaunchAgent at {})", plist.display());
+        println!(
+            "observer is not installed (no LaunchAgent at {})",
+            plist.display()
+        );
         return Ok(());
     }
     if !is_loaded() {
