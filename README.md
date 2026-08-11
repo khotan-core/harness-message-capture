@@ -37,6 +37,10 @@ khotan-observer logs      # follow background activity
 khotan-observer status
 khotan-observer stop
 khotan-observer uninstall
+
+# Local proof sink (optional): receive into a directory, then inspect.
+khotan-observer receive --token qa-token
+khotan-observer read --tool cursor --limit 20
 ```
 
 Running in the foreground shows what it's doing:
@@ -80,41 +84,65 @@ connection strings, common `password=` / `api_key=` assignments) before it is
 spooled and uploaded. The client stays dumb: it ships redacted raw lines; the
 server can parse per-tool semantics later.
 
-## Local QA (no production ingest)
+## Local QA (inbox receive + read)
 
-1. Start a throwaway receiver:
+Prove end-to-end capture without a production ingest server:
+
+1. Start the local receiver (writes authenticated batches to a directory):
 
    ```bash
-   python3 - <<'PY'
-   from http.server import BaseHTTPRequestHandler, HTTPServer
-   import json
-   class H(BaseHTTPRequestHandler):
-       def do_POST(self):
-           n = int(self.headers.get("Content-Length", 0))
-           body = self.rfile.read(n)
-           print(body.decode()[:2000])
-           open("/tmp/khotan-observer-received.ndjson", "ab").write(body + b"\n")
-           self.send_response(204); self.end_headers()
-       def log_message(self, *a): pass
-   HTTPServer(("127.0.0.1", 8787), H).serve_forever()
-   PY
+   # Uses the token from config if already configured; otherwise pass --token.
+   khotan-observer receive --bind 127.0.0.1:8787 --token qa-token
    ```
 
-2. Point the observer at it and run once:
+   Default inbox: `~/.local/state/harness-message-capture/inbox/`
+   Layout: `{device_id}/{tool}/{project}/{session_id}.ndjson`
+
+2. Point the observer at it:
 
    ```bash
    khotan-observer configure --endpoint http://127.0.0.1:8787/ingest --token qa-token
-   khotan-observer run-once
-   khotan-observer status
+   khotan-observer run-once   # or: khotan-observer run
    ```
 
-3. Send a Cursor prompt containing a unique marker (e.g. `KHOTAN_QA_MARKER`),
-   then `run-once` again and confirm the marker appears in
-   `/tmp/khotan-observer-received.ndjson`.
+3. Send a Cursor / Claude Code / Codex prompt containing a unique marker
+   (e.g. `KHOTAN_QA_MARKER`), then capture again and inspect:
+
+   ```bash
+   khotan-observer run-once
+   khotan-observer read --tool cursor --limit 20
+   # or dump redacted raw JSONL:
+   khotan-observer read --raw --limit 5
+   ```
+
+`read` renders recognizable user/assistant text when the line shape is known
+(Cursor-style, and similar Claude `type` envelopes). Unrecognized harness
+events are shown as preserved redacted raw JSONL with provenance — nothing is
+dropped just because the local reader can't parse it yet.
 
 Tip: to avoid uploading historical transcripts on first run, baseline offsets
 to the current end of every `*.jsonl` under the source roots before the first
 `run` / `run-once`.
+
+### Throwaway Python receiver (optional)
+
+If you only need to dump POSTs without using `receive`/`read`:
+
+```bash
+python3 - <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(n)
+        print(body.decode()[:2000])
+        open("/tmp/khotan-observer-received.ndjson", "ab").write(body + b"\n")
+        self.send_response(204); self.end_headers()
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", 8787), H).serve_forever()
+PY
+```
 
 ## Build from source
 

@@ -2,10 +2,13 @@ mod agent;
 mod capture;
 mod config;
 mod log;
+mod reader;
+mod receiver;
 mod record;
 mod redact;
 mod sources;
 mod spool;
+mod store;
 mod uploader;
 
 use anyhow::{Context, Result};
@@ -14,6 +17,7 @@ use config::Config;
 use notify::{RecursiveMode, Watcher};
 use spool::Spool;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -36,6 +40,8 @@ fn run() -> Result<()> {
         "logs" => agent::logs(!args.iter().any(|a| a == "--no-follow")),
         "run-once" => run_once(),
         "status" => status(),
+        "receive" => receive_cmd(&args[2..]),
+        "read" => read_cmd(&args[2..]),
         _ => {
             print_help();
             Ok(())
@@ -55,7 +61,9 @@ fn print_help() {
            khotan-observer logs         Follow the background log\n\
            khotan-observer uninstall    Stop & remove the LaunchAgent\n\
            khotan-observer status       Show config, sources, and spool state\n\
-           khotan-observer run-once     Single scan + upload pass, then exit\n"
+           khotan-observer run-once     Single scan + upload pass, then exit\n\
+           khotan-observer receive      Local ingest server (writes to an inbox dir)\n\
+           khotan-observer read         Inspect messages stored in the inbox\n"
     );
 }
 
@@ -197,6 +205,7 @@ fn status() -> Result<()> {
     let offsets = Offsets::load();
     println!("tracked files: {}", offsets.len());
     println!("spool pending: {}", Spool::open().pending());
+    println!("inbox dir    : {}", receiver::default_inbox().display());
     Ok(())
 }
 
@@ -348,6 +357,143 @@ fn drain(cfg: &Config, spool: &Spool) -> (usize, Option<String>) {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ReceiveArgs {
+    bind: String,
+    dir: PathBuf,
+    token: Option<String>,
+}
+
+fn parse_receive_args(args: &[String]) -> Result<ReceiveArgs> {
+    let mut bind = None;
+    let mut dir = None;
+    let mut token = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bind" => {
+                bind = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--dir" => {
+                dir = args.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--token" => {
+                token = args.get(i + 1).cloned();
+                i += 2;
+            }
+            other => anyhow::bail!("unknown flag: {other}"),
+        }
+    }
+    Ok(ReceiveArgs {
+        bind: bind.unwrap_or_else(|| "127.0.0.1:8787".into()),
+        dir: dir.unwrap_or_else(receiver::default_inbox),
+        token,
+    })
+}
+
+fn receive_cmd(args: &[String]) -> Result<()> {
+    let parsed = parse_receive_args(args)?;
+    let token = match parsed.token {
+        Some(t) if !t.is_empty() => t,
+        _ => Config::load()
+            .map(|c| c.token)
+            .context("token required — pass --token or run configure first")?,
+    };
+    if token.is_empty() {
+        anyhow::bail!("token is required");
+    }
+    receiver::serve(receiver::ReceiveOpts {
+        bind: parsed.bind,
+        dir: parsed.dir,
+        token,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReadArgs {
+    dir: PathBuf,
+    tool: Option<String>,
+    project: Option<String>,
+    session: Option<String>,
+    device: Option<String>,
+    limit: usize,
+    raw: bool,
+}
+
+fn parse_read_args(args: &[String]) -> Result<ReadArgs> {
+    let mut dir = None;
+    let mut tool = None;
+    let mut project = None;
+    let mut session = None;
+    let mut device = None;
+    let mut limit = None;
+    let mut raw = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dir" => {
+                dir = args.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--tool" => {
+                tool = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--project" => {
+                project = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--session" => {
+                session = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--device" => {
+                device = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--limit" => {
+                let raw = args.get(i + 1).context("--limit requires a positive integer")?;
+                limit = Some(
+                    raw.parse::<usize>()
+                        .context("--limit requires a positive integer")?,
+                );
+                i += 2;
+            }
+            "--raw" => {
+                raw = true;
+                i += 1;
+            }
+            other => anyhow::bail!("unknown flag: {other}"),
+        }
+    }
+    Ok(ReadArgs {
+        dir: dir.unwrap_or_else(receiver::default_inbox),
+        tool,
+        project,
+        session,
+        device,
+        limit: limit.unwrap_or(50),
+        raw,
+    })
+}
+
+fn read_cmd(args: &[String]) -> Result<()> {
+    let parsed = parse_read_args(args)?;
+    reader::run(reader::ReadOpts {
+        dir: parsed.dir,
+        filter: store::ReadFilter {
+            device_id: parsed.device,
+            tool: parsed.tool,
+            project: parsed.project,
+            session_id: parsed.session,
+        },
+        limit: parsed.limit,
+        raw: parsed.raw,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +538,47 @@ mod tests {
     fn parse_configure_rejects_unknown_flag() {
         let err = parse_configure_args(&s(&["--endpoint", "http://x", "--nope"])).unwrap_err();
         assert!(err.to_string().contains("unknown flag"));
+    }
+
+    #[test]
+    fn parse_receive_defaults() {
+        let parsed = parse_receive_args(&s(&[])).unwrap();
+        assert_eq!(parsed.bind, "127.0.0.1:8787");
+        assert!(parsed.token.is_none());
+        assert!(parsed.dir.ends_with("inbox"));
+    }
+
+    #[test]
+    fn parse_receive_flags() {
+        let parsed = parse_receive_args(&s(&[
+            "--bind",
+            "127.0.0.1:9000",
+            "--dir",
+            "/tmp/inbox",
+            "--token",
+            "t",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.bind, "127.0.0.1:9000");
+        assert_eq!(parsed.dir, PathBuf::from("/tmp/inbox"));
+        assert_eq!(parsed.token.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn parse_read_flags() {
+        let parsed = parse_read_args(&s(&[
+            "--tool",
+            "cursor",
+            "--session",
+            "abc",
+            "--limit",
+            "10",
+            "--raw",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.tool.as_deref(), Some("cursor"));
+        assert_eq!(parsed.session.as_deref(), Some("abc"));
+        assert_eq!(parsed.limit, 10);
+        assert!(parsed.raw);
     }
 }
