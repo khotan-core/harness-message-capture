@@ -1,45 +1,91 @@
 #!/usr/bin/env bash
-# harness-message-capture installer.
+# khotan-observer installer — download from public GitHub Releases.
 #
-# Usage (from a checkout):
-#   HMC_ENDPOINT=https://your-server/ingest HMC_TOKEN=hmc_xxx ./dist/install.sh
+# One-liner:
+#   curl -fsSL https://raw.githubusercontent.com/khotan-core/harness-message-capture/main/dist/install.sh | bash
 #
-# Or one-shot from GitHub once releases exist:
-#   HMC_BINARY_URL=https://github.com/ORG/harness-message-capture/releases/latest/download/hmc-aarch64-apple-darwin \
-#   HMC_ENDPOINT=https://your-server/ingest HMC_TOKEN=hmc_xxx \
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/ORG/harness-message-capture/main/dist/install.sh)"
+# Optional env overrides:
+#   KHOTAN_OBSERVER_VERSION=v0.1.0   # pin a release tag (default: latest)
+#   KHOTAN_OBSERVER_BIN_DIR=~/.local/bin
+#   KHOTAN_OBSERVER_REPO=khotan-core/harness-message-capture
 #
-# Note: a binary fetched via curl/bash is NOT flagged with the macOS quarantine
+# After install:
+#   khotan-observer configure --endpoint https://your-ingest/ingest
+#   khotan-observer run
+#
+# Note: a binary fetched via curl is NOT flagged with the macOS quarantine
 # attribute, so no Apple code-signing/notarization is required for it to run.
 set -euo pipefail
 
-BIN_DIR="${HMC_BIN_DIR:-$HOME/.local/bin}"
-BIN_PATH="$BIN_DIR/hmc"
+REPO="${KHOTAN_OBSERVER_REPO:-khotan-core/harness-message-capture}"
+BIN_DIR="${KHOTAN_OBSERVER_BIN_DIR:-$HOME/.local/bin}"
+BIN_NAME="khotan-observer"
+BIN_PATH="$BIN_DIR/$BIN_NAME"
+VERSION="${KHOTAN_OBSERVER_VERSION:-latest}"
 
-: "${HMC_ENDPOINT:?set HMC_ENDPOINT to your ingest URL}"
-: "${HMC_TOKEN:?set HMC_TOKEN to this machine's enrollment token}"
+die() { echo "error: $*" >&2; exit 1; }
 
-mkdir -p "$BIN_DIR"
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
-if [ -n "${HMC_BINARY_URL:-}" ]; then
-  echo "==> Downloading binary from $HMC_BINARY_URL"
-  curl -fsSL "$HMC_BINARY_URL" -o "$BIN_PATH"
-  chmod +x "$BIN_PATH"
-elif command -v cargo >/dev/null 2>&1; then
-  echo "==> Building from source with cargo (release)"
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  ( cd "$SCRIPT_DIR" && cargo build --release )
-  cp "$SCRIPT_DIR/target/release/hmc" "$BIN_PATH"
+need curl
+need shasum
+
+# --- detect macOS architecture ---------------------------------------------
+os="$(uname -s)"
+arch="$(uname -m)"
+[[ "$os" == "Darwin" ]] || die "only macOS is supported (got $os)"
+
+case "$arch" in
+  arm64)  TARGET="aarch64-apple-darwin" ;;
+  x86_64) TARGET="x86_64-apple-darwin" ;;
+  *)      die "unsupported architecture: $arch" ;;
+esac
+
+ASSET="${BIN_NAME}-${TARGET}"
+CHECKSUM_ASSET="${ASSET}.sha256"
+
+if [[ "$VERSION" == "latest" ]]; then
+  BASE="https://github.com/${REPO}/releases/latest/download"
 else
-  echo "error: no HMC_BINARY_URL set and cargo not found — cannot obtain binary" >&2
-  exit 1
+  BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 fi
 
-echo "==> Enrolling"
-"$BIN_PATH" enroll --endpoint "$HMC_ENDPOINT" --token "$HMC_TOKEN"
+BINARY_URL="${BASE}/${ASSET}"
+CHECKSUM_URL="${BASE}/${CHECKSUM_ASSET}"
 
-echo "==> Installing background LaunchAgent"
-"$BIN_PATH" install
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
 
-echo "==> Done. Status:"
-"$BIN_PATH" status
+echo "==> Downloading ${ASSET} (${VERSION})"
+curl -fsSL "$BINARY_URL" -o "$tmp/$ASSET"
+curl -fsSL "$CHECKSUM_URL" -o "$tmp/$CHECKSUM_ASSET"
+
+echo "==> Verifying checksum"
+# Accept either `HASH` or `HASH  filename` formats.
+expected="$(awk '{print $1}' "$tmp/$CHECKSUM_ASSET")"
+[[ -n "$expected" ]] || die "empty checksum file"
+actual="$(shasum -a 256 "$tmp/$ASSET" | awk '{print $1}')"
+[[ "$expected" == "$actual" ]] || die "checksum mismatch (expected $expected, got $actual)"
+
+echo "==> Installing to $BIN_PATH"
+mkdir -p "$BIN_DIR"
+install -m 755 "$tmp/$ASSET" "$BIN_PATH"
+
+# --- PATH guidance ---------------------------------------------------------
+if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
+  echo ""
+  echo "NOTE: $BIN_DIR is not on your PATH."
+  echo "Add this to your shell profile (~/.zshrc or ~/.bashrc):"
+  echo "  export PATH=\"$BIN_DIR:\$PATH\""
+  echo ""
+fi
+
+"$BIN_PATH" >/dev/null 2>&1 || true
+echo "==> Installed: $BIN_PATH"
+echo ""
+echo "Next steps:"
+echo "  1. khotan-observer configure --endpoint https://YOUR_INGEST/ingest"
+echo "     (you'll be prompted for the enrollment token)"
+echo "  2. khotan-observer run          # foreground, easy to QA"
+echo "     or: khotan-observer start    # background LaunchAgent"
+echo ""

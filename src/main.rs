@@ -12,12 +12,13 @@ use capture::Offsets;
 use config::Config;
 use notify::{RecursiveMode, Watcher};
 use spool::Spool;
+use std::io::{self, BufRead, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("hmc: {e:#}");
+        eprintln!("khotan-observer: {e:#}");
         std::process::exit(1);
     }
 }
@@ -26,10 +27,11 @@ fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "enroll" => enroll(&args[2..]),
-        "install" => agent::install(),
+        "configure" => configure(&args[2..]),
+        "run" => watch(),
+        "start" => agent::start(),
+        "stop" => agent::stop(),
         "uninstall" => agent::uninstall(),
-        "watch" => watch(),
         "run-once" => run_once(),
         "status" => status(),
         _ => {
@@ -41,19 +43,28 @@ fn run() -> Result<()> {
 
 fn print_help() {
     eprintln!(
-        "harness-message-capture (hmc)\n\
+        "khotan-observer — capture local AI coding-agent transcripts\n\
          \n\
          USAGE:\n\
-           hmc enroll --endpoint <url> --token <tok> [--poll <secs>] [--batch <n>]\n\
-           hmc install       Install & start the background LaunchAgent\n\
-           hmc uninstall     Stop & remove the LaunchAgent\n\
-           hmc watch         Run the capture daemon in the foreground\n\
-           hmc run-once      Do a single scan + upload pass, then exit\n\
-           hmc status        Show config, sources, and spool state\n"
+           khotan-observer configure --endpoint <url> [--token <tok>]\n\
+           khotan-observer run          Capture in the foreground (Ctrl-C to stop)\n\
+           khotan-observer start        Install & start the background LaunchAgent\n\
+           khotan-observer stop         Stop the background LaunchAgent\n\
+           khotan-observer uninstall    Stop & remove the LaunchAgent\n\
+           khotan-observer status       Show config, sources, and spool state\n\
+           khotan-observer run-once     Single scan + upload pass, then exit\n"
     );
 }
 
-fn enroll(args: &[String]) -> Result<()> {
+#[derive(Debug, PartialEq, Eq)]
+struct ConfigureArgs {
+    endpoint: String,
+    token: Option<String>,
+    poll: Option<u64>,
+    batch: Option<usize>,
+}
+
+fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
     let mut endpoint = None;
     let mut token = None;
     let mut poll = None;
@@ -80,27 +91,78 @@ fn enroll(args: &[String]) -> Result<()> {
             other => anyhow::bail!("unknown flag: {other}"),
         }
     }
-    let endpoint = endpoint.context("--endpoint is required")?;
-    let token = token.context("--token is required")?;
+    Ok(ConfigureArgs {
+        endpoint: endpoint.context("--endpoint is required")?,
+        token,
+        poll,
+        batch,
+    })
+}
 
-    // Preserve an existing device_id across re-enrollment.
+fn configure(args: &[String]) -> Result<()> {
+    let parsed = parse_configure_args(args)?;
+    let token = match parsed.token {
+        Some(t) if !t.is_empty() => t,
+        _ => prompt_token()?,
+    };
+    if token.is_empty() {
+        anyhow::bail!("token is required");
+    }
+
+    // Preserve an existing device_id across re-configuration.
     let device_id = Config::load()
         .ok()
         .map(|c| c.device_id)
         .unwrap_or(config::random_id()?);
 
     let cfg = Config {
-        endpoint,
+        endpoint: parsed.endpoint,
         token,
         device_id,
-        poll_secs: poll.unwrap_or(45),
-        batch: batch.unwrap_or(200),
+        poll_secs: parsed.poll.unwrap_or(45),
+        batch: parsed.batch.unwrap_or(200),
     };
     cfg.save()?;
-    println!("enrolled. device_id={}", cfg.device_id);
+    println!("configured. device_id={}", cfg.device_id);
     println!("config: {}", config::config_path().display());
-    println!("next: `hmc install` to start capturing in the background");
+    println!("next: `khotan-observer run` (foreground) or `khotan-observer start` (background)");
     Ok(())
+}
+
+/// Prompt for a token on /dev/tty with echo disabled (macOS / Unix).
+fn prompt_token() -> Result<String> {
+    let mut tty_out = fs_open_tty_write()?;
+    write!(tty_out, "Enrollment token: ")?;
+    tty_out.flush()?;
+
+    // Disable echo so the token isn't visible in the terminal.
+    let _ = std::process::Command::new("stty")
+        .args(["-echo"])
+        .stdin(std::process::Stdio::inherit())
+        .status();
+
+    let mut line = String::new();
+    let result = io::BufReader::new(fs_open_tty_read()?).read_line(&mut line);
+
+    let _ = std::process::Command::new("stty")
+        .args(["echo"])
+        .stdin(std::process::Stdio::inherit())
+        .status();
+    writeln!(tty_out)?;
+
+    result.context("read token from terminal")?;
+    Ok(line.trim().to_string())
+}
+
+fn fs_open_tty_read() -> Result<std::fs::File> {
+    std::fs::File::open("/dev/tty").context("open /dev/tty for reading")
+}
+
+fn fs_open_tty_write() -> Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .context("open /dev/tty for writing")
 }
 
 fn status() -> Result<()> {
@@ -115,6 +177,15 @@ fn status() -> Result<()> {
     println!("device_id: {}", cfg.device_id);
     println!("poll_secs: {}", cfg.poll_secs);
     println!("batch    : {}", cfg.batch);
+    println!(
+        "background: {}",
+        if agent::is_loaded() {
+            "running"
+        } else {
+            "stopped"
+        }
+    );
+    println!("log file : {}", agent::log_file().display());
     println!("sources  :");
     for s in sources::discover() {
         println!("  [{}] {}", s.tool, s.root.display());
@@ -142,18 +213,17 @@ fn watch() -> Result<()> {
     let spool = Spool::open();
 
     let (tx, rx) = mpsc::channel();
-    let mut watcher =
-        notify::recommended_watcher(move |res| {
-            let _ = tx.send(res);
-        })
-        .context("create fs watcher")?;
+    let mut watcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })
+    .context("create fs watcher")?;
 
     for s in &srcs {
         // Best-effort: a missing/again-permissioned dir shouldn't kill the daemon.
         let _ = watcher.watch(&s.root, RecursiveMode::Recursive);
     }
     eprintln!(
-        "hmc watch: {} source(s), poll every {}s",
+        "khotan-observer run: {} source(s), poll every {}s",
         srcs.len(),
         cfg.poll_secs
     );
@@ -183,11 +253,11 @@ fn scan_and_ship(cfg: &Config, srcs: &[sources::Source], offsets: &mut Offsets, 
     let records = capture::collect_new(srcs, offsets);
     if !records.is_empty() {
         if let Err(e) = spool.append(&records) {
-            eprintln!("hmc: spool append failed: {e:#}");
+            eprintln!("khotan-observer: spool append failed: {e:#}");
             return; // don't advance offsets if we couldn't persist
         }
         if let Err(e) = offsets.save() {
-            eprintln!("hmc: offsets save failed: {e:#}");
+            eprintln!("khotan-observer: offsets save failed: {e:#}");
         }
     }
     drain(cfg, spool);
@@ -204,7 +274,10 @@ fn drain(cfg: &Config, spool: &Spool) {
                 let _ = spool.drop_front(batch.len());
             }
             uploader::Upload::Drop => {
-                eprintln!("hmc: server rejected {} record(s), dropping", batch.len());
+                eprintln!(
+                    "khotan-observer: server rejected {} record(s), dropping",
+                    batch.len()
+                );
                 let _ = spool.drop_front(batch.len());
             }
             uploader::Upload::Retry => {
@@ -212,5 +285,52 @@ fn drain(cfg: &Config, spool: &Spool) {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_configure_requires_endpoint() {
+        let err = parse_configure_args(&s(&["--token", "abc"])).unwrap_err();
+        assert!(err.to_string().contains("--endpoint"));
+    }
+
+    #[test]
+    fn parse_configure_with_token() {
+        let parsed =
+            parse_configure_args(&s(&["--endpoint", "http://x/ingest", "--token", "tok"])).unwrap();
+        assert_eq!(parsed.endpoint, "http://x/ingest");
+        assert_eq!(parsed.token.as_deref(), Some("tok"));
+        assert_eq!(parsed.poll, None);
+        assert_eq!(parsed.batch, None);
+    }
+
+    #[test]
+    fn parse_configure_optional_flags() {
+        let parsed = parse_configure_args(&s(&[
+            "--endpoint",
+            "http://x/ingest",
+            "--poll",
+            "10",
+            "--batch",
+            "50",
+        ]))
+        .unwrap();
+        assert!(parsed.token.is_none());
+        assert_eq!(parsed.poll, Some(10));
+        assert_eq!(parsed.batch, Some(50));
+    }
+
+    #[test]
+    fn parse_configure_rejects_unknown_flag() {
+        let err = parse_configure_args(&s(&["--endpoint", "http://x", "--nope"])).unwrap_err();
+        assert!(err.to_string().contains("unknown flag"));
     }
 }

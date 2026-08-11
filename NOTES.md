@@ -64,9 +64,9 @@ an assumption.
 Landed on the simplest viable shape:
 
 - **CLI binary, not a `.app`.** Skips Apple signing/notarization entirely
- (see distribution trick above). Go was the suggested language: single
- static binary, no runtime deps, `fsnotify` for watching, trivial
- cross-compile.
+ (see distribution trick above). Landed on **Rust** for a tiny always-on
+ footprint (single ~2 MB static binary, no runtime). Public name:
+ `khotan-observer`.
 - **Background execution via a LaunchAgent** (`~/Library/LaunchAgents/*.plist`,
  `RunAtLoad` + `KeepAlive`), not `nohup &` — survives logout/reboot.
 - **Four components:**
@@ -78,13 +78,13 @@ Landed on the simplest viable shape:
     machine (borrow Paxel's pattern list as a starting point).
  4. *Uploader* — batched HTTPS `POST` with a per-device/employee token,
     retry with backoff.
-- **Install UX target:**
+- **Install UX target (implemented):**
  ```bash
- brew install yourco/tap/harness-message-capture
- harness-message-capture enroll --token=...
- harness-message-capture start   # writes + loads the LaunchAgent
+ curl -fsSL https://raw.githubusercontent.com/khotan-core/harness-message-capture/main/dist/install.sh | bash
+ khotan-observer configure --endpoint https://…/ingest
+ khotan-observer run     # foreground
+ khotan-observer start   # background LaunchAgent
  ```
- or a one-line `curl | bash` installer as the no-Homebrew fallback.
 - **Permissions:** dotfile paths (`~/.claude`, `~/.codex`) are always
  readable by a plain user process; `~/Library/Application Support/Cursor`
  is normally fine for a non-sandboxed process too. Full Disk Access is the
@@ -109,9 +109,9 @@ referenced later, but it's not the basis for this project.
 
 ## Open questions going into this repo
 
-- Language: Go was proposed in the original discussion, not yet confirmed
- for this fresh start.
-- Server: stub endpoint needed for end-to-end testing — stack undecided.
+- Server: production `POST /ingest` endpoint — stack undecided.
 - Whether to reuse *any* concepts from the deleted prior art (e.g. its
  contract-versioning approach, or its adapter split per tool) or design
  those pieces from scratch.
+- macOS code signing / notarization before broad employee rollout
+ (optional; curl-installed binaries skip Gatekeeper quarantine).

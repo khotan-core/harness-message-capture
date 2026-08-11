@@ -7,7 +7,7 @@ license = "UNLICENSED"
 publish = false
 
 [[bin]]
-name = "hmc"
+name = "khotan-observer"
 path = "src/main.rs"
 
 [dependencies]
