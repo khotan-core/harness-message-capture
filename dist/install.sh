@@ -10,7 +10,7 @@
 #   KHOTAN_OBSERVER_REPO=khotan-core/harness-message-capture
 #
 # After install:
-#   khotan-observer configure --endpoint https://your-ingest/ingest
+#   khotan-observer configure
 #   khotan-observer run
 #
 # Note: a binary fetched via curl is NOT flagged with the macOS quarantine
@@ -117,8 +117,8 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "  1. khotan-observer configure --endpoint https://YOUR_INGEST/ingest"
-echo "     (you'll be prompted for the enrollment token)"
+echo "  1. khotan-observer configure"
+echo "     (customer routes come from repo-local env.khotan.local files)"
 echo "  2. khotan-observer run          # foreground, live log"
 echo "     or: khotan-observer start    # background LaunchAgent"
 echo ""

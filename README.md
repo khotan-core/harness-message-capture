@@ -1,7 +1,8 @@
 # khotan-observer
 
 Tiny macOS background agent that captures local AI coding-agent transcripts
-(Cursor, Claude Code, Codex) and ships redacted lines to your ingest endpoint.
+(Cursor, Claude Code, Codex) and ships redacted lines to the Khotan organization
+pinned by each customer repository.
 
 Designed to feel barely there: a single ~2 MB Rust binary, event-driven file
 watching, durable local spool, and a LaunchAgent that starts at login.
@@ -25,8 +26,8 @@ KHOTAN_OBSERVER_VERSION=v0.1.0 \
 ## Configure & run
 
 ```bash
-# You'll be prompted for the enrollment token (not echoed).
-khotan-observer configure --endpoint https://YOUR_INGEST/ingest
+# Optional tuning. Customer destinations are discovered from repositories.
+khotan-observer configure --poll 45 --batch 200
 
 # Foreground — live log, Ctrl-C to stop.
 khotan-observer run
@@ -74,8 +75,8 @@ When several workspaces contribute in one pass, labels are listed with counts:
   16:30:09   captured 13   uploaded 13   harness-message-capture×10, khotan×3
 ```
 
-If the endpoint is unreachable, nothing is lost — records queue on disk and
-the line tells you so:
+If a customer endpoint is unreachable, nothing is lost — that customer's
+records remain in its isolated local queue and other customers keep draining:
 
 ```
   15:52:47   captured 5   queued 531   ⚠ endpoint unreachable (connection refused) — retrying
@@ -99,34 +100,37 @@ connection strings, common `password=` / `api_key=` assignments) before it is
 spooled and uploaded. The client stays dumb: it ships redacted raw lines; the
 server can parse per-tool semantics later.
 
-## Local QA (inbox receive + read)
+Only workspaces that resolve to a complete repo-local destination are captured:
 
-Prove end-to-end capture without a production ingest server:
+```dotenv
+KHOTAN_API_URL='https://customer.example'
+KHOTAN_API_KEY='organization-scoped-key'
+KHOTAN_ORG_ID='expected-organization-id'
+```
+
+The observer checks `GET /api/v1/me` before delivery and fails closed unless
+the key's organization matches `KHOTAN_ORG_ID`. API keys are read at send time;
+they are never copied into message records, queue metadata, or logs. Repositories
+without a valid destination are skipped and their offsets advance, so adding a
+destination later does not retroactively upload old chats.
+
+## Local inbox reader
+
+The bundled receiver remains useful for inspecting the legacy batch shape:
 
 1. Start the local receiver (writes authenticated batches to a directory):
 
    ```bash
-   # Uses the token from config if already configured; otherwise pass --token.
    khotan-observer receive --bind 127.0.0.1:8787 --token qa-token
    ```
 
    Default inbox: `~/.local/state/harness-message-capture/inbox/`
    Layout: `{device_id}/{tool}/{project}/{session_id}.ndjson`
 
-2. Point the observer at it:
+2. Inspect records already written to the inbox:
 
    ```bash
-   khotan-observer configure --endpoint http://127.0.0.1:8787/ingest --token qa-token
-   khotan-observer run-once   # or: khotan-observer run
-   ```
-
-3. Send a Cursor / Claude Code / Codex prompt containing a unique marker
-   (e.g. `KHOTAN_QA_MARKER`), then capture again and inspect:
-
-   ```bash
-   khotan-observer run-once
    khotan-observer read --tool cursor --limit 20
-   # or dump redacted raw JSONL:
    khotan-observer read --raw --limit 5
    ```
 
@@ -181,6 +185,7 @@ installer always targets `releases/latest` unless `KHOTAN_OBSERVER_VERSION` is s
 
 ## Privacy & consent
 
-This tool is intended for consented employee installs. Nothing is uploaded until
-`configure` is run with a real endpoint and token. Secrets are scrubbed on-device
-before leaving the machine; see `src/redact.rs` for the pattern list.
+This tool is intended for consented employee installs. Nothing is uploaded for
+a workspace unless its repository contains a complete, organization-verified
+Khotan destination. Secrets are scrubbed on-device before leaving the machine;
+see `src/redact.rs` for the pattern list.

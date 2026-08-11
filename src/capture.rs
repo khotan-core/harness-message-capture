@@ -1,7 +1,9 @@
 use crate::config::state_dir;
+use crate::destination::{self, RouteRef};
 use crate::record::{now_ms, Record};
 use crate::redact;
 use crate::sources::{jsonl_files, Source};
+use crate::workspace::WorkspaceIndex;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -36,11 +38,11 @@ impl Offsets {
         Ok(())
     }
 
-    fn get(&self, key: &str) -> u64 {
+    pub fn get(&self, key: &str) -> u64 {
         *self.map.get(key).unwrap_or(&0)
     }
 
-    fn set(&mut self, key: String, val: u64) {
+    pub fn set(&mut self, key: String, val: u64) {
         self.map.insert(key, val);
     }
 
@@ -49,27 +51,42 @@ impl Offsets {
     }
 }
 
-/// Read newly-appended complete lines across all sources, redact them, and
-/// return the resulting records. Offsets are advanced only past whole lines.
-pub fn collect_new(sources: &[Source], offsets: &mut Offsets) -> Vec<Record> {
-    let mut records = Vec::new();
+#[derive(Debug)]
+pub struct CapturedFile {
+    pub route: Option<RouteRef>,
+    pub records: Vec<Record>,
+    pub offset_key: String,
+    pub next_offset: u64,
+    pub project: String,
+    pub route_warning: Option<String>,
+}
+
+/// Read newly-appended complete lines without mutating offsets. The caller
+/// commits each returned offset only after the records are durably queued, or
+/// intentionally when the workspace has no valid customer destination.
+pub fn collect_new(
+    sources: &[Source],
+    offsets: &Offsets,
+    workspaces: &WorkspaceIndex,
+) -> Vec<CapturedFile> {
+    let mut captured = Vec::new();
     for src in sources {
         for file in jsonl_files(&src.root) {
-            if let Err(_e) = read_file(src, &file, offsets, &mut records) {
-                // Non-fatal: skip this file this pass (e.g. transient perm error).
-                continue;
+            match read_file(src, &file, offsets, workspaces) {
+                Ok(Some(result)) => captured.push(result),
+                Ok(None) | Err(_) => continue,
             }
         }
     }
-    records
+    captured
 }
 
 fn read_file(
     src: &Source,
     file: &Path,
-    offsets: &mut Offsets,
-    out: &mut Vec<Record>,
-) -> Result<()> {
+    offsets: &Offsets,
+    workspaces: &WorkspaceIndex,
+) -> Result<Option<CapturedFile>> {
     let key = file.to_string_lossy().to_string();
     let meta = fs::metadata(file).with_context(|| format!("stat {}", file.display()))?;
     let len = meta.len();
@@ -80,7 +97,7 @@ fn read_file(
         offset = 0;
     }
     if len == offset {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut f = fs::File::open(file)?;
@@ -91,10 +108,22 @@ fn read_file(
     // Only advance past the last complete (newline-terminated) line.
     let last_nl = match buf.iter().rposition(|&b| b == b'\n') {
         Some(p) => p,
-        None => return Ok(()), // no complete line yet
+        None => return Ok(None), // no complete line yet
     };
 
-    let (project, session_id) = provenance(src.tool, file, &src.root);
+    let workspace = workspaces.resolve(src.tool, file, &src.root);
+    let (project, session_id) = provenance(src.tool, file, &src.root, workspace.as_deref());
+    let (route, route_warning) = match workspace.as_deref() {
+        Some(workspace) => match destination::resolve(workspace) {
+            Ok(route) => (route, None),
+            Err(error) => (
+                None,
+                Some(format!("{}: {error}", project)),
+            ),
+        },
+        None => (None, None),
+    };
+    let mut records = Vec::new();
     let complete = &buf[..=last_nl];
     for raw in complete.split(|&b| b == b'\n') {
         if raw.is_empty() {
@@ -102,7 +131,7 @@ fn read_file(
         }
         let line = String::from_utf8_lossy(raw);
         let scrubbed = redact::scrub(&line);
-        out.push(Record {
+        records.push(Record {
             schema: "v1".to_string(),
             tool: src.tool.to_string(),
             project: project.clone(),
@@ -112,22 +141,39 @@ fn read_file(
         });
     }
 
-    offsets.set(key, offset + last_nl as u64 + 1);
-    Ok(())
+    Ok(Some(CapturedFile {
+        route,
+        records,
+        offset_key: key,
+        next_offset: offset + last_nl as u64 + 1,
+        project,
+        route_warning,
+    }))
 }
 
 /// Derive a best-effort (project, session) pair from the transcript path.
 /// `project` is a human-readable workspace/thread label when we can recover one
 /// (e.g. `harness-message-capture` from Cursor's encoded project dir); `session`
 /// is the file stem (usually the chat/session id).
-fn provenance(tool: &str, file: &Path, root: &Path) -> (String, String) {
+fn provenance(
+    tool: &str,
+    file: &Path,
+    root: &Path,
+    workspace: Option<&Path>,
+) -> (String, String) {
     let session = file
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     let project = match tool {
-        "cursor" | "claude" => workspace_label(file, root),
-        "codex" => "codex".to_string(),
+        "cursor" | "claude" => workspace
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| workspace_label(file, root)),
+        "codex" => workspace
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "codex".to_string()),
         _ => parent_dir_name(file),
     };
     (project, session)
@@ -238,7 +284,7 @@ mod tests {
             .join("agent-transcripts")
             .join("76a56200-c845-4f62-b741-ca6237573ade")
             .join("76a56200-c845-4f62-b741-ca6237573ade.jsonl");
-        let (project, session) = provenance("cursor", &file, &root);
+        let (project, session) = provenance("cursor", &file, &root, None);
         assert_eq!(project, "harness-message-capture");
         assert_eq!(session, "76a56200-c845-4f62-b741-ca6237573ade");
     }

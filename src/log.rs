@@ -72,7 +72,13 @@ fn row(label: &str, value: &str) {
 }
 
 /// Startup summary printed once when the watcher comes up.
-pub fn banner(endpoint: &str, device: &str, sources: &[&str], files: usize, ready_ms: u128) {
+pub fn banner(
+    device: &str,
+    sources: &[&str],
+    files: usize,
+    routes: usize,
+    ready_ms: u128,
+) {
     let version = env!("CARGO_PKG_VERSION");
     let src = if sources.is_empty() {
         "none found".to_string()
@@ -86,9 +92,9 @@ pub fn banner(endpoint: &str, device: &str, sources: &[&str], files: usize, read
         version.if_supports_color(Stderr, |t| t.dimmed()),
     );
     eprintln!();
-    row("Endpoint", endpoint);
     row("Device", device);
     row("Sources", &src);
+    row("Routes", &format!("{} customer destination(s)", routes));
     row("Tracking", &format!("{} transcript files", thousands(files)));
     eprintln!();
     eprintln!(
@@ -106,6 +112,7 @@ pub fn banner(endpoint: &str, device: &str, sources: &[&str], files: usize, read
 pub fn activity(
     captured: usize,
     uploaded: usize,
+    skipped: usize,
     spool: usize,
     threads: Option<&str>,
     warn: Option<&str>,
@@ -123,6 +130,13 @@ pub fn activity(
             "{} {}",
             "uploaded".if_supports_color(Stderr, |t| t.dimmed()),
             uploaded.if_supports_color(Stderr, |t| t.cyan()),
+        ));
+    }
+    if skipped > 0 {
+        parts.push(format!(
+            "{} {}",
+            "skipped".if_supports_color(Stderr, |t| t.dimmed()),
+            skipped.if_supports_color(Stderr, |t| t.yellow()),
         ));
     }
     // A backlog only matters when delivery could not complete; don't clutter
