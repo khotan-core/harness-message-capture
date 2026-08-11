@@ -67,9 +67,33 @@ expected="$(awk '{print $1}' "$tmp/$CHECKSUM_ASSET")"
 actual="$(shasum -a 256 "$tmp/$ASSET" | awk '{print $1}')"
 [[ "$expected" == "$actual" ]] || die "checksum mismatch (expected $expected, got $actual)"
 
+# --- upgrade safely ---------------------------------------------------------
+# If a previous version is running, it holds the binary's inode mapped. Writing
+# over it in place leaves the kernel's cached code hash out of sync with the
+# file, and every later exec dies with SIGKILL ("zsh: killed"). So: stop the
+# agent, replace via a fresh inode, and restart only if it was running before.
+WAS_RUNNING=0
+if launchctl list 2>/dev/null | grep -q "com.khotan.observer"; then
+  WAS_RUNNING=1
+  echo "==> Stopping running observer before upgrade"
+  launchctl unload "$HOME/Library/LaunchAgents/com.khotan.observer.plist" 2>/dev/null || true
+  sleep 1
+fi
+
 echo "==> Installing to $BIN_PATH"
 mkdir -p "$BIN_DIR"
-install -m 755 "$tmp/$ASSET" "$BIN_PATH"
+rm -f "$BIN_PATH"                      # new inode, never overwrite in place
+cp "$tmp/$ASSET" "$BIN_PATH"
+chmod 755 "$BIN_PATH"
+
+# Fail loudly here rather than leaving a binary that gets killed on exec.
+if ! "$BIN_PATH" status >/dev/null 2>&1; then
+  code=$?
+  if [[ $code -eq 137 ]]; then
+    die "installed binary was killed on exec (code signature/inode issue)"
+  fi
+  # Any other non-zero is fine: `status` exits non-zero when not yet configured.
+fi
 
 # --- PATH guidance ---------------------------------------------------------
 if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
@@ -80,12 +104,21 @@ if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
   echo ""
 fi
 
-"$BIN_PATH" >/dev/null 2>&1 || true
 echo "==> Installed: $BIN_PATH"
+
+if [[ "$WAS_RUNNING" -eq 1 ]]; then
+  echo "==> Restarting background observer"
+  "$BIN_PATH" start
+  echo ""
+  echo "Upgrade complete. Follow it with: khotan-observer logs"
+  echo ""
+  exit 0
+fi
+
 echo ""
 echo "Next steps:"
 echo "  1. khotan-observer configure --endpoint https://YOUR_INGEST/ingest"
 echo "     (you'll be prompted for the enrollment token)"
-echo "  2. khotan-observer run          # foreground, easy to QA"
+echo "  2. khotan-observer run          # foreground, live log"
 echo "     or: khotan-observer start    # background LaunchAgent"
 echo ""
