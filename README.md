@@ -55,8 +55,14 @@ Running in the foreground shows what it's doing:
 
   ✓ Watching in 3ms  · Ctrl-C to stop
 
-  15:53:05   captured 12   uploaded 12   spool 0
+  15:53:05   captured 12   uploaded 12   spool 0   harness-message-capture
   15:58:05   idle · watching 3,952 files · spool 0
+```
+
+When several workspaces contribute in one pass, labels are listed with counts:
+
+```
+  16:30:09   captured 13   uploaded 13   spool 0   harness-message-capture×10, khotan×3
 ```
 
 If the endpoint is unreachable, nothing is lost — records queue on disk and

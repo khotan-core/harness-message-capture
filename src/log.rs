@@ -101,7 +101,14 @@ pub fn banner(endpoint: &str, device: &str, sources: &[&str], files: usize, read
 }
 
 /// One activity line: what was captured, what got delivered, what's queued.
-pub fn activity(captured: usize, uploaded: usize, spool: usize, warn: Option<&str>) {
+/// `threads` is an optional workspace/chat label summary (e.g. `harness-message-capture`).
+pub fn activity(
+    captured: usize,
+    uploaded: usize,
+    spool: usize,
+    threads: Option<&str>,
+    warn: Option<&str>,
+) {
     let mut parts: Vec<String> = Vec::new();
     if captured > 0 {
         parts.push(format!(
@@ -127,6 +134,9 @@ pub fn activity(captured: usize, uploaded: usize, spool: usize, warn: Option<&st
     } else {
         format!("{} {}", dim("spool"), dim("0"))
     });
+    if let Some(t) = threads.filter(|s| !s.is_empty()) {
+        parts.push(t.if_supports_color(Stderr, |s| s.magenta()).to_string());
+    }
 
     let mut line = format!("  {}   {}", dim(&clock()), parts.join("   "));
     if let Some(w) = warn {

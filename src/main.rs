@@ -217,7 +217,7 @@ fn run_once() -> Result<()> {
     let spool = Spool::open();
     let pass = scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
     if !report(pass, &spool) {
-        log::activity(0, 0, spool.pending(), Some("nothing new to capture"));
+        log::activity(0, 0, spool.pending(), None, Some("nothing new to capture"));
     }
     Ok(())
 }
@@ -290,6 +290,8 @@ fn watch() -> Result<()> {
 struct Pass {
     captured: usize,
     uploaded: usize,
+    /// Human-readable workspace/thread labels touched this pass.
+    threads: Option<String>,
     warn: Option<String>,
 }
 
@@ -302,6 +304,7 @@ fn report(pass: Pass, spool: &Spool) -> bool {
         pass.captured,
         pass.uploaded,
         spool.pending(),
+        pass.threads.as_deref(),
         pass.warn.as_deref(),
     );
     true
@@ -316,6 +319,7 @@ fn scan_and_ship(
     let mut pass = Pass::default();
     let records = capture::collect_new(srcs, offsets);
     if !records.is_empty() {
+        pass.threads = Some(capture::thread_summary(&records));
         if let Err(e) = spool.append(&records) {
             pass.warn = Some(format!("could not write to spool: {e}"));
             return pass; // don't advance offsets if we couldn't persist

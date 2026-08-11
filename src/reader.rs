@@ -1,7 +1,6 @@
-use crate::store::{self, ReadFilter, StoredRecord};
+use crate::store::{self, ReadFilter};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct ReadOpts {
@@ -168,7 +167,11 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Helper used by tests that want records without printing.
 #[cfg(test)]
-pub fn load(dir: &Path, filter: &ReadFilter, limit: usize) -> Result<Vec<StoredRecord>> {
+pub fn load(
+    dir: &std::path::Path,
+    filter: &ReadFilter,
+    limit: usize,
+) -> Result<Vec<store::StoredRecord>> {
     let mut records = store::list_records(dir, filter)?;
     if limit > 0 && records.len() > limit {
         let skip = records.len() - limit;

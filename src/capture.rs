@@ -94,7 +94,7 @@ fn read_file(
         None => return Ok(()), // no complete line yet
     };
 
-    let (project, session_id) = provenance(file, &src.root);
+    let (project, session_id) = provenance(src.tool, file, &src.root);
     let complete = &buf[..=last_nl];
     for raw in complete.split(|&b| b == b'\n') {
         if raw.is_empty() {
@@ -116,17 +116,148 @@ fn read_file(
     Ok(())
 }
 
-/// Derive a best-effort (project, session) pair from the path: session is the
-/// file stem, project is the immediate parent directory name.
-fn provenance(file: &Path, _root: &Path) -> (String, String) {
+/// Derive a best-effort (project, session) pair from the transcript path.
+/// `project` is a human-readable workspace/thread label when we can recover one
+/// (e.g. `harness-message-capture` from Cursor's encoded project dir); `session`
+/// is the file stem (usually the chat/session id).
+fn provenance(tool: &str, file: &Path, root: &Path) -> (String, String) {
     let session = file
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let project = file
-        .parent()
+    let project = match tool {
+        "cursor" | "claude" => workspace_label(file, root),
+        "codex" => "codex".to_string(),
+        _ => parent_dir_name(file),
+    };
+    (project, session)
+}
+
+fn parent_dir_name(file: &Path) -> String {
+    file.parent()
         .and_then(|p| p.file_name())
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    (project, session)
+        .unwrap_or_default()
+}
+
+/// First path component under the tool root is the encoded workspace slug.
+fn workspace_label(file: &Path, root: &Path) -> String {
+    let slug = file
+        .strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .unwrap_or_else(|| parent_dir_name(file));
+    humanize_workspace_slug(&slug)
+}
+
+/// Turn Cursor/Claude encoded path dirs into a short chat/workspace label.
+///
+/// Examples:
+/// - `Users-adeep-Developer-harness-message-capture` → `harness-message-capture`
+/// - `-Users-adeep-Developer-khotan--claude-worktrees-foo` → `foo`
+pub fn humanize_workspace_slug(slug: &str) -> String {
+    let s = slug.trim().trim_start_matches('-');
+    if s.is_empty() {
+        return "unknown".into();
+    }
+    // Prefer the leaf after a worktrees marker when present.
+    for marker in ["-worktrees-", "--claude-worktrees-", "-claude-worktrees-"] {
+        if let Some(idx) = s.rfind(marker) {
+            let leaf = &s[idx + marker.len()..];
+            if !leaf.is_empty() {
+                return leaf.to_string();
+            }
+        }
+    }
+    for marker in ["Developer-", "Projects-", "repos-", "code-"] {
+        if let Some(idx) = s.rfind(marker) {
+            let rest = &s[idx + marker.len()..];
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    s.to_string()
+}
+
+/// Compact summary of which workspaces/threads a capture batch touched, e.g.
+/// `harness-message-capture×3, khotan×1`.
+pub fn thread_summary(records: &[Record]) -> String {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for r in records {
+        let label = if r.project.is_empty() {
+            r.tool.clone()
+        } else {
+            r.project.clone()
+        };
+        *counts.entry(label).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(label, n)| {
+            if n == 1 {
+                label
+            } else {
+                format!("{label}×{n}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn humanizes_cursor_developer_slug() {
+        assert_eq!(
+            humanize_workspace_slug("Users-adeep-Developer-harness-message-capture"),
+            "harness-message-capture"
+        );
+    }
+
+    #[test]
+    fn humanizes_claude_worktree_slug() {
+        assert_eq!(
+            humanize_workspace_slug(
+                "-Users-adeep-Developer-notanerp--claude-worktrees-blissful-roentgen"
+            ),
+            "blissful-roentgen"
+        );
+    }
+
+    #[test]
+    fn cursor_provenance_uses_workspace_not_session_dir() {
+        let root = PathBuf::from("/Users/adeep/.cursor/projects");
+        let file = root
+            .join("Users-adeep-Developer-harness-message-capture")
+            .join("agent-transcripts")
+            .join("76a56200-c845-4f62-b741-ca6237573ade")
+            .join("76a56200-c845-4f62-b741-ca6237573ade.jsonl");
+        let (project, session) = provenance("cursor", &file, &root);
+        assert_eq!(project, "harness-message-capture");
+        assert_eq!(session, "76a56200-c845-4f62-b741-ca6237573ade");
+    }
+
+    #[test]
+    fn thread_summary_counts_per_project() {
+        let rec = |project: &str| Record {
+            schema: "v1".into(),
+            tool: "cursor".into(),
+            project: project.into(),
+            session_id: "s".into(),
+            captured_at_ms: 1,
+            line: "{}".into(),
+        };
+        let s = thread_summary(&[
+            rec("harness-message-capture"),
+            rec("harness-message-capture"),
+            rec("khotan"),
+        ]);
+        assert_eq!(s, "harness-message-capture×2, khotan");
+    }
 }
