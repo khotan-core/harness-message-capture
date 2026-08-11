@@ -1,52 +1,132 @@
-use crate::config::Config;
+use crate::destination::{self, RouteRef};
 use crate::record::Record;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Serialize)]
 struct Batch<'a> {
     device_id: &'a str,
+    organization_id: &'a str,
     records: &'a [Record],
 }
 
-/// Result of an upload attempt. `Retry` means keep the records spooled and try
-/// again later (network/5xx); `Ok`/`Drop` both mean stop retrying this batch.
-/// The failure variants carry a short reason so the daemon can surface it.
-pub enum Upload {
-    Ok,
-    /// Server rejected the batch (4xx) — drop it rather than loop forever.
-    Drop(String),
-    Retry(String),
+#[derive(Deserialize)]
+struct Principal {
+    #[serde(rename = "organizationId")]
+    organization_id: Option<String>,
 }
 
-pub fn send(cfg: &Config, records: &[Record]) -> Upload {
+const VERIFY_TTL: Duration = Duration::from_secs(5 * 60);
+const INGEST_PATH: &str = "/ingest";
+static VERIFIED: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+pub enum Upload {
+    Ok,
+    Retry(String),
+    Blocked(String),
+}
+
+pub fn send(device_id: &str, route: &RouteRef, records: &[Record]) -> Upload {
     if records.is_empty() {
         return Upload::Ok;
     }
+    let credentials = match destination::read_credentials(route) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            return Upload::Blocked(format!(
+                "{} credentials unavailable or changed: {error}",
+                route.label
+            ))
+        }
+    };
+    match verify_org(route, &credentials.api_key) {
+        Upload::Ok => {}
+        outcome => return outcome,
+    }
+
     let body = match serde_json::to_string(&Batch {
-        device_id: &cfg.device_id,
+        device_id,
+        organization_id: &route.org_id,
         records,
     }) {
         Ok(b) => b,
-        Err(e) => return Upload::Drop(format!("could not serialize batch: {e}")),
+        Err(e) => return Upload::Blocked(format!("could not serialize batch: {e}")),
     };
 
-    let resp = ureq::post(&cfg.endpoint)
-        .set("Authorization", &format!("Bearer {}", cfg.token))
+    let endpoint = format!("{}{INGEST_PATH}", route.api_url);
+    let resp = ureq::post(&endpoint)
+        .set("x-api-key", &credentials.api_key)
         .set("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(Duration::from_secs(20))
         .send_string(&body);
 
-    match resp {
-        Ok(_) => Upload::Ok,
-        Err(ureq::Error::Status(code, _)) => {
-            if (500..=599).contains(&code) || code == 429 {
-                Upload::Retry(format!("server returned {code}"))
-            } else {
-                Upload::Drop(format!("server rejected batch with {code}"))
-            }
+    classify_response(resp, "ingest")
+}
+
+fn verify_org(route: &RouteRef, api_key: &str) -> Upload {
+    let cache_key = format!("{}\n{}", route.api_url, route.org_id);
+    let cache = VERIFIED.get_or_init(|| Mutex::new(HashMap::new()));
+    if cache
+        .lock()
+        .ok()
+        .and_then(|verified| verified.get(&cache_key).copied())
+        .is_some_and(|at| at.elapsed() < VERIFY_TTL)
+    {
+        return Upload::Ok;
+    }
+
+    let url = format!("{}/api/v1/me", route.api_url);
+    let response = ureq::get(&url)
+        .set("x-api-key", api_key)
+        .set("Accept", "application/json")
+        .timeout(Duration::from_secs(20))
+        .call();
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return classify_error(error, "identity check"),
+    };
+    let principal: Principal = match response.into_json() {
+        Ok(principal) => principal,
+        Err(error) => {
+            return Upload::Blocked(format!(
+                "{} identity response was invalid: {error}",
+                route.label
+            ))
         }
-        // Transport error (offline, DNS, timeout) — keep and retry.
-        Err(e) => Upload::Retry(transport_reason(&e)),
+    };
+    if principal.organization_id.as_deref() != Some(route.org_id.as_str()) {
+        return Upload::Blocked(format!(
+            "{} organization verification failed",
+            route.label
+        ));
+    }
+    if let Ok(mut verified) = cache.lock() {
+        verified.insert(cache_key, Instant::now());
+    }
+    Upload::Ok
+}
+
+fn classify_response(
+    response: Result<ureq::Response, ureq::Error>,
+    operation: &str,
+) -> Upload {
+    match response {
+        Ok(_) => Upload::Ok,
+        Err(error) => classify_error(error, operation),
+    }
+}
+
+fn classify_error(error: ureq::Error, operation: &str) -> Upload {
+    match error {
+        ureq::Error::Status(code, _) if (500..=599).contains(&code) || code == 429 => {
+            Upload::Retry(format!("{operation} returned {code}"))
+        }
+        ureq::Error::Status(code, _) => {
+            Upload::Blocked(format!("{operation} rejected the request with {code}"))
+        }
+        error => Upload::Retry(transport_reason(&error)),
     }
 }
 
@@ -62,5 +142,153 @@ fn transport_reason(e: &ureq::Error) -> String {
         "could not resolve endpoint host".into()
     } else {
         format!("upload failed: {raw}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn fixture_route(origin: String, org_id: &str) -> (RouteRef, PathBuf) {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hmc-upload-{stamp}.env"));
+        fs::write(
+            &path,
+            format!(
+                "KHOTAN_API_URL='{origin}'\nKHOTAN_API_KEY='test-secret-key'\nKHOTAN_ORG_ID='{org_id}'\n"
+            ),
+        )
+        .unwrap();
+        (
+            RouteRef {
+                id: format!("route-{stamp}"),
+                org_id: org_id.into(),
+                api_url: origin,
+                credential_path: path.clone(),
+                label: "customer".into(),
+            },
+            path,
+        )
+    }
+
+    fn record() -> Record {
+        Record {
+            schema: "v1".into(),
+            tool: "cursor".into(),
+            project: "customer".into(),
+            session_id: "session".into(),
+            captured_at_ms: 1,
+            line: "{}".into(),
+        }
+    }
+
+    fn spawn_server(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let handle = thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut data = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let count = stream.read(&mut chunk).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&chunk[..count]);
+                    if let Some(header_end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&data[..header_end + 4]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= header_end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&data).to_string());
+                let reason = if status == 200 { "OK" } else { "Error" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        (origin, requests, handle)
+    }
+
+    #[test]
+    fn verifies_org_then_sends_homogeneous_batch_without_secret_body() {
+        let (origin, requests, handle) = spawn_server(vec![
+            (200, r#"{"organizationId":"org-test"}"#),
+            (204, ""),
+        ]);
+        let (route, env_path) = fixture_route(origin, "org-test");
+        assert!(matches!(
+            send("device", &route, &[record()]),
+            Upload::Ok
+        ));
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].starts_with("GET /api/v1/me "));
+        assert!(requests[0].to_ascii_lowercase().contains("x-api-key: test-secret-key"));
+        assert!(requests[1].starts_with("POST /ingest "));
+        assert!(requests[1].contains(r#""organization_id":"org-test""#));
+        assert!(!requests[1]
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or("")
+            .contains("test-secret-key"));
+        let _ = fs::remove_file(env_path);
+    }
+
+    #[test]
+    fn organization_mismatch_blocks_and_never_posts() {
+        let (origin, _requests, handle) =
+            spawn_server(vec![(200, r#"{"organizationId":"wrong-org"}"#)]);
+        let (route, env_path) = fixture_route(origin, "expected-org");
+        assert!(matches!(
+            send("device", &route, &[record()]),
+            Upload::Blocked(_)
+        ));
+        handle.join().unwrap();
+        let _ = fs::remove_file(env_path);
+    }
+
+    #[test]
+    fn identity_server_failure_is_retryable() {
+        let (origin, _requests, handle) = spawn_server(vec![(500, "{}")]);
+        let (route, env_path) = fixture_route(origin, "org-test");
+        assert!(matches!(
+            send("device", &route, &[record()]),
+            Upload::Retry(_)
+        ));
+        handle.join().unwrap();
+        let _ = fs::remove_file(env_path);
     }
 }

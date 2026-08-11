@@ -1,6 +1,7 @@
 mod agent;
 mod capture;
 mod config;
+mod destination;
 mod log;
 mod reader;
 mod receiver;
@@ -11,13 +12,13 @@ mod sources;
 mod spool;
 mod store;
 mod uploader;
+mod workspace;
 
 use anyhow::{Context, Result};
 use capture::Offsets;
 use config::Config;
 use notify::{RecursiveMode, Watcher};
 use spool::Spool;
-use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -56,7 +57,7 @@ fn print_help() {
         "khotan-observer — capture local AI coding-agent transcripts\n\
          \n\
          USAGE:\n\
-           khotan-observer configure --endpoint <url> [--token <tok>]\n\
+           khotan-observer configure [--poll <seconds>] [--batch <count>] [--search-root <path>]\n\
            khotan-observer run          Capture in the foreground (Ctrl-C to stop)\n\
            khotan-observer start        Install & start the background LaunchAgent\n\
            khotan-observer stop         Stop the background LaunchAgent\n\
@@ -72,70 +73,58 @@ fn print_help() {
 
 #[derive(Debug, PartialEq, Eq)]
 struct ConfigureArgs {
-    endpoint: String,
-    token: Option<String>,
     poll: Option<u64>,
     batch: Option<usize>,
+    search_roots: Vec<PathBuf>,
 }
 
 fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
-    let mut endpoint = None;
-    let mut token = None;
     let mut poll = None;
     let mut batch = None;
+    let mut search_roots = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--endpoint" => {
-                endpoint = args.get(i + 1).cloned();
-                i += 2;
-            }
-            "--token" => {
-                token = args.get(i + 1).cloned();
-                i += 2;
-            }
             "--poll" => {
-                poll = args.get(i + 1).and_then(|v| v.parse().ok());
+                let value = args.get(i + 1).context("--poll requires seconds")?;
+                poll = Some(value.parse().context("--poll requires seconds")?);
                 i += 2;
             }
             "--batch" => {
-                batch = args.get(i + 1).and_then(|v| v.parse().ok());
+                let value = args.get(i + 1).context("--batch requires a count")?;
+                batch = Some(value.parse().context("--batch requires a count")?);
+                i += 2;
+            }
+            "--search-root" => {
+                let value = args.get(i + 1).context("--search-root requires a path")?;
+                search_roots.push(PathBuf::from(value));
                 i += 2;
             }
             other => anyhow::bail!("unknown flag: {other}"),
         }
     }
     Ok(ConfigureArgs {
-        endpoint: endpoint.context("--endpoint is required")?,
-        token,
         poll,
         batch,
+        search_roots,
     })
 }
 
 fn configure(args: &[String]) -> Result<()> {
     let parsed = parse_configure_args(args)?;
-    let token = match parsed.token {
-        Some(t) if !t.is_empty() => t,
-        _ => prompt_token()?,
-    };
-    if token.is_empty() {
-        anyhow::bail!("token is required");
+    let mut cfg =
+        Config::load().unwrap_or(Config::fresh(config::random_id()?));
+    if let Some(poll) = parsed.poll {
+        cfg.poll_secs = poll;
     }
-
-    // Preserve an existing device_id across re-configuration.
-    let device_id = Config::load()
-        .ok()
-        .map(|c| c.device_id)
-        .unwrap_or(config::random_id()?);
-
-    let cfg = Config {
-        endpoint: parsed.endpoint,
-        token,
-        device_id,
-        poll_secs: parsed.poll.unwrap_or(45),
-        batch: parsed.batch.unwrap_or(200),
-    };
+    if let Some(batch) = parsed.batch {
+        cfg.batch = batch;
+    }
+    if !parsed.search_roots.is_empty() {
+        cfg.search_roots = parsed.search_roots;
+    }
+    cfg.endpoint = None;
+    cfg.token = None;
     cfg.save()?;
     println!("configured. device_id={}", cfg.device_id);
     println!("config: {}", config::config_path().display());
@@ -143,51 +132,8 @@ fn configure(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Prompt for a token on /dev/tty with echo disabled (macOS / Unix).
-fn prompt_token() -> Result<String> {
-    let mut tty_out = fs_open_tty_write()?;
-    write!(tty_out, "Enrollment token: ")?;
-    tty_out.flush()?;
-
-    // Disable echo so the token isn't visible in the terminal.
-    let _ = std::process::Command::new("stty")
-        .args(["-echo"])
-        .stdin(std::process::Stdio::inherit())
-        .status();
-
-    let mut line = String::new();
-    let result = io::BufReader::new(fs_open_tty_read()?).read_line(&mut line);
-
-    let _ = std::process::Command::new("stty")
-        .args(["echo"])
-        .stdin(std::process::Stdio::inherit())
-        .status();
-    writeln!(tty_out)?;
-
-    result.context("read token from terminal")?;
-    Ok(line.trim().to_string())
-}
-
-fn fs_open_tty_read() -> Result<std::fs::File> {
-    std::fs::File::open("/dev/tty").context("open /dev/tty for reading")
-}
-
-fn fs_open_tty_write() -> Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .context("open /dev/tty for writing")
-}
-
 fn status() -> Result<()> {
     let cfg = Config::load()?;
-    let masked = if cfg.token.len() > 6 {
-        format!("{}…", &cfg.token[..6])
-    } else {
-        "set".into()
-    };
-    println!("endpoint : {}", cfg.endpoint);
-    println!("token    : {masked}");
     println!("device_id: {}", cfg.device_id);
     println!("poll_secs: {}", cfg.poll_secs);
     println!("batch    : {}", cfg.batch);
@@ -205,9 +151,24 @@ fn status() -> Result<()> {
     for s in sources::discover() {
         println!("  [{}] {}", s.tool, s.root.display());
     }
+    println!("search roots:");
+    for root in &cfg.search_roots {
+        println!("  {}", root.display());
+    }
+    let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
+    let routes = destination::discover_routes(workspaces.candidates());
+    println!("customer routes: {}", routes.len());
+    for route in routes {
+        println!("  {}", route.label);
+    }
     let offsets = Offsets::load();
     println!("tracked files: {}", offsets.len());
-    println!("spool pending: {}", Spool::open().pending());
+    let spool = Spool::open();
+    println!("spool pending: {}", spool.pending());
+    println!(
+        "legacy quarantine: {}",
+        if spool.has_quarantine() { "present" } else { "none" }
+    );
     println!("inbox dir    : {}", receiver::default_inbox().display());
     Ok(())
 }
@@ -221,7 +182,14 @@ fn run_once() -> Result<()> {
     let spool = Spool::open();
     let pass = scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
     if !report(pass, &spool) {
-        log::activity(0, 0, spool.pending(), None, Some("nothing new to capture"));
+        log::activity(
+            0,
+            0,
+            0,
+            spool.pending(),
+            None,
+            Some("nothing new to capture"),
+        );
     }
     Ok(())
 }
@@ -249,11 +217,13 @@ fn watch() -> Result<()> {
     }
 
     let tools: Vec<&str> = srcs.iter().map(|s| s.tool).collect();
+    let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
+    let route_count = destination::discover_routes(workspaces.candidates()).len();
     log::banner(
-        &cfg.endpoint,
         &cfg.device_id,
         &tools,
         offsets.len(),
+        route_count,
         started.elapsed().as_millis(),
     );
     if srcs.is_empty() {
@@ -295,6 +265,7 @@ fn watch() -> Result<()> {
 struct Pass {
     captured: usize,
     uploaded: usize,
+    skipped: usize,
     /// Human-readable workspace/thread labels touched this pass.
     threads: Option<String>,
     warn: Option<String>,
@@ -302,12 +273,13 @@ struct Pass {
 
 /// Print a line for any pass that did something. Returns whether it printed.
 fn report(pass: Pass, spool: &Spool) -> bool {
-    if pass.captured == 0 && pass.uploaded == 0 && pass.warn.is_none() {
+    if pass.captured == 0 && pass.uploaded == 0 && pass.skipped == 0 && pass.warn.is_none() {
         return false;
     }
     log::activity(
         pass.captured,
         pass.uploaded,
+        pass.skipped,
         spool.pending(),
         pass.threads.as_deref(),
         pass.warn.as_deref(),
@@ -322,48 +294,107 @@ fn scan_and_ship(
     spool: &Spool,
 ) -> Pass {
     let mut pass = Pass::default();
-    let records = capture::collect_new(srcs, offsets);
-    if !records.is_empty() {
-        pass.threads = Some(capture::thread_summary(&records));
-        if let Err(e) = spool.append(&records) {
-            pass.warn = Some(format!("could not write to spool: {e}"));
-            return pass; // don't advance offsets if we couldn't persist
+    let mut warnings = Vec::new();
+    match spool.quarantine_legacy() {
+        Ok(Some(_)) => warnings.push("legacy unrouted queue moved to quarantine".to_string()),
+        Ok(None) => {}
+        Err(error) => warnings.push(format!("could not quarantine legacy queue: {error}")),
+    }
+
+    let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
+    let files = capture::collect_new(srcs, offsets, &workspaces);
+    let mut summary_records = Vec::new();
+    let mut offsets_changed = false;
+    for file in files {
+        if let Some(warning) = file.route_warning {
+            warnings.push(format!("destination blocked: {warning}"));
         }
-        pass.captured = records.len();
-        if let Err(e) = offsets.save() {
-            pass.warn = Some(format!("could not save offsets: {e}"));
+        match file.route {
+            Some(route) => match spool.append(&route, &file.records) {
+                Ok(()) => {
+                    pass.captured += file.records.len();
+                    summary_records.extend(file.records);
+                    offsets.set(file.offset_key, file.next_offset);
+                    offsets_changed = true;
+                }
+                Err(error) => warnings.push(format!(
+                    "could not queue {} records for {}: {error}",
+                    file.records.len(),
+                    route.label
+                )),
+            },
+            None => {
+                pass.skipped += file.records.len();
+                offsets.set(file.offset_key, file.next_offset);
+                offsets_changed = true;
+            }
         }
     }
-    let (uploaded, warn) = drain(cfg, spool);
+    if !summary_records.is_empty() {
+        pass.threads = Some(capture::thread_summary(&summary_records));
+    }
+    if offsets_changed {
+        if let Err(e) = offsets.save() {
+            warnings.push(format!("could not save offsets: {e}"));
+        }
+    }
+    let (uploaded, drain_warnings) = drain(cfg, spool);
     pass.uploaded = uploaded;
-    pass.warn = pass.warn.or(warn);
+    warnings.extend(drain_warnings);
+    if !warnings.is_empty() {
+        const MAX_WARNINGS: usize = 3;
+        let extra = warnings.len().saturating_sub(MAX_WARNINGS);
+        warnings.truncate(MAX_WARNINGS);
+        if extra > 0 {
+            warnings.push(format!("{extra} more warning(s)"));
+        }
+        pass.warn = Some(warnings.join("; "));
+    }
     pass
 }
 
-/// Ship spooled records until the spool is empty or the endpoint pushes back.
-fn drain(cfg: &Config, spool: &Spool) -> (usize, Option<String>) {
+/// Drain each customer independently so one blocked route cannot stall others.
+fn drain(cfg: &Config, spool: &Spool) -> (usize, Vec<String>) {
     let mut uploaded = 0;
-    loop {
-        let batch = spool.peek(cfg.batch);
-        if batch.is_empty() {
-            return (uploaded, None);
-        }
-        match uploader::send(cfg, &batch) {
-            uploader::Upload::Ok => {
-                let _ = spool.drop_front(batch.len());
-                uploaded += batch.len();
+    let mut warnings = Vec::new();
+    for queued in spool.routes() {
+        loop {
+            let batch = match spool.peek(&queued.route, cfg.batch) {
+                Ok(batch) => batch,
+                Err(error) => {
+                    warnings.push(format!(
+                        "{} queue is blocked by corrupt data: {error}",
+                        queued.route.label
+                    ));
+                    break;
+                }
+            };
+            if batch.is_empty() {
+                break;
             }
-            uploader::Upload::Drop(reason) => {
-                let n = batch.len();
-                let _ = spool.drop_front(n);
-                return (uploaded, Some(format!("dropped {n} record(s): {reason}")));
-            }
-            uploader::Upload::Retry(reason) => {
-                // Leave everything spooled; try again on the next pass.
-                return (uploaded, Some(format!("{reason} — retrying")));
+            match uploader::send(&cfg.device_id, &queued.route, &batch) {
+                uploader::Upload::Ok => {
+                    if let Err(error) = spool.drop_front(&queued.route, batch.len()) {
+                        warnings.push(format!(
+                            "{} uploaded but queue could not advance: {error}",
+                            queued.route.label
+                        ));
+                        break;
+                    }
+                    uploaded += batch.len();
+                }
+                uploader::Upload::Retry(reason) => {
+                    warnings.push(format!("{reason} — retrying"));
+                    break;
+                }
+                uploader::Upload::Blocked(reason) => {
+                    warnings.push(format!("{reason} — records retained"));
+                    break;
+                }
             }
         }
     }
+    (uploaded, warnings)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -407,8 +438,9 @@ fn receive_cmd(args: &[String]) -> Result<()> {
     let token = match parsed.token {
         Some(t) if !t.is_empty() => t,
         _ => Config::load()
-            .map(|c| c.token)
-            .context("token required — pass --token or run configure first")?,
+            .ok()
+            .and_then(|c| c.token)
+            .context("token required — pass --token explicitly")?,
     };
     if token.is_empty() {
         anyhow::bail!("token is required");
@@ -525,40 +557,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_configure_requires_endpoint() {
-        let err = parse_configure_args(&s(&["--token", "abc"])).unwrap_err();
-        assert!(err.to_string().contains("--endpoint"));
-    }
-
-    #[test]
-    fn parse_configure_with_token() {
-        let parsed =
-            parse_configure_args(&s(&["--endpoint", "http://x/ingest", "--token", "tok"])).unwrap();
-        assert_eq!(parsed.endpoint, "http://x/ingest");
-        assert_eq!(parsed.token.as_deref(), Some("tok"));
+    fn parse_configure_defaults() {
+        let parsed = parse_configure_args(&s(&[])).unwrap();
         assert_eq!(parsed.poll, None);
         assert_eq!(parsed.batch, None);
+        assert!(parsed.search_roots.is_empty());
     }
 
     #[test]
     fn parse_configure_optional_flags() {
         let parsed = parse_configure_args(&s(&[
-            "--endpoint",
-            "http://x/ingest",
             "--poll",
             "10",
             "--batch",
             "50",
+            "--search-root",
+            "/work/customers",
         ]))
         .unwrap();
-        assert!(parsed.token.is_none());
         assert_eq!(parsed.poll, Some(10));
         assert_eq!(parsed.batch, Some(50));
+        assert_eq!(
+            parsed.search_roots,
+            vec![PathBuf::from("/work/customers")]
+        );
     }
 
     #[test]
     fn parse_configure_rejects_unknown_flag() {
-        let err = parse_configure_args(&s(&["--endpoint", "http://x", "--nope"])).unwrap_err();
+        let err = parse_configure_args(&s(&["--nope"])).unwrap_err();
         assert!(err.to_string().contains("unknown flag"));
     }
 

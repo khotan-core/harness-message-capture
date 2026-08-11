@@ -4,13 +4,15 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
-/// On-disk configuration written by `hmc enroll` and read by the daemon.
+/// On-disk configuration written by `configure` and read by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Fully-qualified ingest endpoint, e.g. https://example.com/ingest
-    pub endpoint: String,
-    /// Per-machine bearer token issued at enrollment.
-    pub token: String,
+    /// Legacy global endpoint, accepted only so v1 configs still load.
+    #[serde(default, skip_serializing)]
+    pub endpoint: Option<String>,
+    /// Legacy global bearer token, accepted only for the local proof receiver.
+    #[serde(default, skip_serializing)]
+    pub token: Option<String>,
     /// Stable identifier for this install, generated once at enrollment.
     pub device_id: String,
     /// How often (seconds) to run the fallback rescan even without fs events.
@@ -19,6 +21,9 @@ pub struct Config {
     /// Max records per upload batch.
     #[serde(default = "default_batch")]
     pub batch: usize,
+    /// Roots searched for customer repositories and worktrees.
+    #[serde(default = "default_search_roots")]
+    pub search_roots: Vec<PathBuf>,
 }
 
 fn default_poll_secs() -> u64 {
@@ -27,6 +32,21 @@ fn default_poll_secs() -> u64 {
 
 fn default_batch() -> usize {
     200
+}
+
+pub fn default_search_roots() -> Vec<PathBuf> {
+    let h = home();
+    [
+        h.join("Developer"),
+        h.join("Projects"),
+        h.join("repos"),
+        h.join("code"),
+        h.join("conductor").join("workspaces"),
+        h.join(".cursor").join("worktrees"),
+    ]
+    .into_iter()
+    .filter(|path| path.is_dir())
+    .collect()
 }
 
 impl Config {
@@ -48,6 +68,17 @@ impl Config {
         let body = toml::to_string_pretty(self)?;
         fs::write(&path, body)?;
         Ok(())
+    }
+
+    pub fn fresh(device_id: String) -> Config {
+        Config {
+            endpoint: None,
+            token: None,
+            device_id,
+            poll_secs: default_poll_secs(),
+            batch: default_batch(),
+            search_roots: default_search_roots(),
+        }
     }
 }
 
@@ -80,4 +111,29 @@ pub fn random_id() -> Result<String> {
         out.push_str(&format!("{b:02x}"));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_global_fields_load_but_are_not_saved() {
+        let cfg: Config = toml::from_str(
+            r#"
+endpoint = "http://old.example/ingest"
+token = "old-secret"
+device_id = "device"
+poll_secs = 10
+batch = 20
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.endpoint.as_deref(), Some("http://old.example/ingest"));
+        assert_eq!(cfg.token.as_deref(), Some("old-secret"));
+
+        let saved = toml::to_string(&cfg).unwrap();
+        assert!(!saved.contains("old.example"));
+        assert!(!saved.contains("old-secret"));
+    }
 }
