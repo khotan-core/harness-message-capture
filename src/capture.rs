@@ -228,8 +228,8 @@ pub fn humanize_workspace_slug(slug: &str) -> String {
     s.to_string()
 }
 
-/// Compact summary of which workspaces/threads a capture batch touched, e.g.
-/// `harness-message-capture×3, khotan×1`.
+/// Compact summary of which workspaces/threads a capture batch touched, with
+/// the source harness, e.g. `harness-message-capture (cursor)×3, khotan (claude)`.
 pub fn thread_summary(records: &[Record]) -> String {
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -237,7 +237,7 @@ pub fn thread_summary(records: &[Record]) -> String {
         let label = if r.project.is_empty() {
             r.tool.clone()
         } else {
-            r.project.clone()
+            format!("{} ({})", r.project, r.tool)
         };
         *counts.entry(label).or_default() += 1;
     }
@@ -319,7 +319,7 @@ mod tests {
             rec("harness-message-capture"),
             rec("khotan"),
         ]);
-        assert_eq!(s, "harness-message-capture×2, khotan");
+        assert_eq!(s, "harness-message-capture (cursor)×2, khotan (cursor)");
     }
 
     #[test]

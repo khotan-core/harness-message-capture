@@ -106,7 +106,7 @@ pub fn banner(device: &str, sources: &[&str], files: usize, routes: usize, ready
 
 /// One activity line: what was captured, what got delivered, and any delivery
 /// backlog. A healthy empty queue is intentionally omitted.
-/// `threads` is an optional workspace/chat label summary (e.g. `harness-message-capture`).
+/// `threads` is an optional workspace/chat label summary (e.g. `harness-message-capture (cursor)`).
 pub fn activity(
     captured: usize,
     uploaded: usize,
