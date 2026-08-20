@@ -1,0 +1,29 @@
+---
+description: After every observer change, bump the version, tag a GitHub Release, wait for CI, and reinstall the binary.
+alwaysApply: true
+---
+
+# Ship observer releases
+
+Every change that lands on `main` must ship as a GitHub Release. Do not leave the user on a stale `~/.local/bin/khotan-observer`. Do this without asking.
+
+## After the code commit is on main
+
+1. Read `version` in `Cargo.toml`. Bump the patch (for example `0.1.3` → `0.1.4`). Keep `Cargo.lock` and the version string in `README.md` in sync.
+2. Commit the bump: `Release vX.Y.Z`.
+3. Create an annotated tag `vX.Y.Z` on that commit.
+4. Push the commit and the tag: `git push origin main` and `git push origin vX.Y.Z`.
+5. Wait until the **Release** workflow on that tag succeeds and the GitHub Release exists.
+6. Reinstall so the running observer picks up the new binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/khotan-core/harness-message-capture/main/dist/install.sh | bash
+```
+
+The installer stops and restarts a running LaunchAgent. Do not overwrite the binary in place.
+
+## Do not skip
+
+- A push to `main` does not publish a binary. Only a `v*` tag runs `.github/workflows/release.yml`.
+- `cargo build --release` is not a substitute unless the user asks for a local swap.
+- Do not wait for the user to remind you to tag, release, or reinstall.
