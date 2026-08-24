@@ -6,6 +6,8 @@ Install also writes a copy to `~/.local/share/khotan-observer/help.md`.
 Nothing leaves this machine unless the chat maps to a git repo on the allow
 list, and that repo has a complete `env.khotan.local` or `.env.khotan.local`.
 
+Deliveries print in green. Warnings print in orange. Errors print in red.
+
 ## Activity lines
 
 `captured N` means new transcript lines were queued.
@@ -16,34 +18,55 @@ list, and that repo has a complete `env.khotan.local` or `.env.khotan.local`.
 
 `queued N` means lines wait on disk because the endpoint did not accept them.
 
-`idle · watching N files` means no new lines this pass.
+`idle (No new lines this pass · N files)` means the watcher is up and quiet.
 
-## Skip reasons
+`harness-message-capture +10` means this pass added 10 lines from that folder.
 
-`empty-window · no repo on this machine, nothing sent`
+## Skip reasons (orange)
 
-The chat folder is not a checkout under the search roots. Common causes are a
-chat with no repo, or a folder that moved.
+`empty-window (Chat has no project folder)`
 
-`podium-automation · dest file broken, nothing sent`
+The chat is not tied to a checkout. Cursor names that window `empty-window`.
+
+`podium-mirror (Repo is real, but not on the allow list)`
+
+The folder exists. You did not add it with `configure --allow-repo`.
+
+`podium-automation (Repo found, dest file missing fields or conflicts)`
 
 The dest file is missing fields, or `env.khotan.local` and `.env.khotan.local`
 disagree. The observer does not advance the offset. It retries.
 
-`empty-window · matched two folders, nothing sent`
+`empty-window (Same encoded path matches two checkouts)`
 
 Two checkouts encode to the same chat folder name. The observer does not guess.
 It does not advance the offset.
 
-A skip with no extra clause means the repo is not on the allow list, or it has
-no dest file. That is expected. Nothing was sent.
+## Delivery problems
 
-## Status lines
+`podium-automation (Host is up in DNS, port is closed)` — orange. Retry later.
 
-`Routes: 0 customer destination(s)` means no allowed repo has a complete dest
-file.
+`podium-automation (No answer in time)` — orange. Retry later.
 
-`allow: none` means the allow list is empty, so nothing uploads.
+`podium-automation (DNS failed)` — orange. Retry later.
+
+`podium-automation (Server error or rate limit)` — orange. Retry later.
+
+`podium-automation (Key or request refused. Queue keeps the lines)` — red.
+
+`podium-automation (Key's org does not match KHOTAN_ORG_ID)` — red.
+
+`podium-automation (Dest file gone or URL/org changed after queue)` — red.
+
+`podium-automation (The /api/v1/me body was not usable)` — red.
+
+`podium-automation (A queued file is unreadable)` — red.
+
+`podium-automation (Send worked, local delete failed)` — red.
+
+`podium-automation (Disk write to the spool failed)` — red.
+
+`observer (Progress file did not write)` — red.
 
 ## Commands
 

@@ -58,8 +58,17 @@ pub fn green(s: &str) -> String {
     s.if_supports_color(Stderr, |t| t.green()).to_string()
 }
 
+pub fn orange(s: &str) -> String {
+    s.if_supports_color(Stderr, |t| t.truecolor(234, 138, 45))
+        .to_string()
+}
+
+pub fn red(s: &str) -> String {
+    s.if_supports_color(Stderr, |t| t.red()).to_string()
+}
+
 /// Brand coral, sampled from the Khotan logo. Reserved for the wordmark so the
-/// tone stays distinct from the colours that carry a status meaning.
+/// tone stays distinct from `orange`, which means a warning.
 pub fn coral(s: &str) -> String {
     s.if_supports_color(Stderr, |t| t.truecolor(240, 74, 34))
         .to_string()
@@ -67,6 +76,26 @@ pub fn coral(s: &str) -> String {
 
 pub fn dim(s: &str) -> String {
     s.if_supports_color(Stderr, |t| t.dimmed()).to_string()
+}
+
+/// `podium-automation (Send worked, local delete failed)`
+pub fn attributed(label: &str, means: &str) -> String {
+    format!("{label} ({means})")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Delivery,
+    Warning,
+    Error,
+}
+
+fn paint(tone: Tone, s: &str) -> String {
+    match tone {
+        Tone::Delivery => green(s),
+        Tone::Warning => orange(s),
+        Tone::Error => red(s),
+    }
 }
 
 /// A `label   value` line in the startup summary. The label is padded before
@@ -179,29 +208,28 @@ pub fn activity(
     uploaded: usize,
     skipped: usize,
     spool: usize,
-    threads: Option<&str>,
-    warn: Option<&str>,
+    notes: &[(Tone, String)],
 ) {
     let mut parts: Vec<String> = Vec::new();
     if captured > 0 {
         parts.push(format!(
             "{} {}",
             "captured".if_supports_color(Stderr, |t| t.dimmed()),
-            captured.if_supports_color(Stderr, |t| t.green()),
+            captured,
         ));
     }
     if uploaded > 0 {
         parts.push(format!(
             "{} {}",
             "uploaded".if_supports_color(Stderr, |t| t.dimmed()),
-            uploaded.if_supports_color(Stderr, |t| t.cyan()),
+            green(&uploaded.to_string()),
         ));
     }
     if skipped > 0 {
         parts.push(format!(
             "{} {}",
             "skipped".if_supports_color(Stderr, |t| t.dimmed()),
-            skipped.if_supports_color(Stderr, |t| t.yellow()),
+            orange(&skipped.to_string()),
         ));
     }
     // A backlog only matters when delivery could not complete; don't clutter
@@ -210,21 +238,14 @@ pub fn activity(
         parts.push(format!(
             "{} {}",
             "queued".if_supports_color(Stderr, |t| t.dimmed()),
-            spool.if_supports_color(Stderr, |t| t.yellow()),
+            orange(&spool.to_string()),
         ));
     }
-    if let Some(t) = threads.filter(|s| !s.is_empty()) {
-        parts.push(t.if_supports_color(Stderr, |s| s.magenta()).to_string());
+    for (tone, note) in notes {
+        parts.push(paint(*tone, note));
     }
 
-    let mut line = format!("  {}   {}", dim(&clock()), parts.join("   "));
-    if let Some(w) = warn {
-        line.push_str(&format!(
-            "   {}",
-            format!("⚠ {w}").if_supports_color(Stderr, |t| t.yellow())
-        ));
-    }
-    eprintln!("{line}");
+    eprintln!("  {}   {}", dim(&clock()), parts.join("   "));
 }
 
 /// Periodic proof-of-life while nothing is being written.
@@ -232,16 +253,15 @@ pub fn idle(files: usize, _spool: usize) {
     eprintln!(
         "  {}   {}",
         dim(&clock()),
-        dim(&format!("idle · watching {} files", thousands(files),)),
+        dim(&format!(
+            "idle (No new lines this pass · {} files)",
+            thousands(files)
+        )),
     );
 }
 
 pub fn warn(msg: &str) {
-    eprintln!(
-        "  {}   {}",
-        dim(&clock()),
-        format!("⚠ {msg}").if_supports_color(Stderr, |t| t.yellow())
-    );
+    eprintln!("  {}   {}", dim(&clock()), orange(msg));
 }
 
 #[cfg(test)]
@@ -293,6 +313,14 @@ mod tests {
             true,
             Some(super::WORDMARK_MIN_COLS - 1)
         ));
+    }
+
+    #[test]
+    fn attributed_puts_means_in_parens() {
+        assert_eq!(
+            super::attributed("podium-automation", "Send worked, local delete failed"),
+            "podium-automation (Send worked, local delete failed)"
+        );
     }
 
     #[test]

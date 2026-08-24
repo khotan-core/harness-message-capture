@@ -34,9 +34,10 @@ mod tests {
 
     #[test]
     fn glossary_covers_skip_lines() {
-        assert!(HELP.contains("no repo on this machine, nothing sent"));
-        assert!(HELP.contains("dest file broken, nothing sent"));
-        assert!(HELP.contains("matched two folders, nothing sent"));
+        assert!(HELP.contains("Chat has no project folder"));
+        assert!(HELP.contains("dest file missing fields or conflicts"));
+        assert!(HELP.contains("Same encoded path matches two checkouts"));
+        assert!(HELP.contains("Send worked, local delete failed"));
         assert!(HELP.contains("khotan-observer docs"));
     }
 }

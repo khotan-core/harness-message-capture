@@ -197,14 +197,7 @@ fn run_once() -> Result<()> {
     let spool = Spool::open();
     let pass = scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
     if !report(pass, &spool) {
-        log::activity(
-            0,
-            0,
-            0,
-            spool.pending(),
-            None,
-            Some("nothing new to capture"),
-        );
+        log::idle(offsets.len(), spool.pending());
     }
     Ok(())
 }
@@ -261,7 +254,7 @@ fn watch() -> Result<()> {
         started.elapsed().as_millis(),
     );
     if srcs.is_empty() {
-        log::warn("no coding-agent transcript directories found — nothing to capture");
+        log::warn("No Cursor, Claude, or Codex folders");
     }
 
     // Catch up on anything appended while we were stopped.
@@ -305,21 +298,24 @@ struct Pass {
     skipped: usize,
     /// Human-readable workspace/thread labels touched this pass.
     threads: Option<String>,
-    warn: Option<String>,
+    notes: Vec<(log::Tone, String)>,
 }
 
 /// Print a line for any pass that did something. Returns whether it printed.
 fn report(pass: Pass, spool: &Spool) -> bool {
-    if pass.captured == 0 && pass.uploaded == 0 && pass.skipped == 0 && pass.warn.is_none() {
+    if pass.captured == 0 && pass.uploaded == 0 && pass.skipped == 0 && pass.notes.is_empty() {
         return false;
+    }
+    let mut notes = pass.notes;
+    if let Some(threads) = pass.threads.filter(|s| !s.is_empty()) {
+        notes.insert(0, (log::Tone::Delivery, threads));
     }
     log::activity(
         pass.captured,
         pass.uploaded,
         pass.skipped,
         spool.pending(),
-        pass.threads.as_deref(),
-        pass.warn.as_deref(),
+        &notes,
     );
     true
 }
@@ -331,11 +327,17 @@ fn scan_and_ship(
     spool: &Spool,
 ) -> Pass {
     let mut pass = Pass::default();
-    let mut warnings = Vec::new();
+    let mut notes: Vec<(log::Tone, String)> = Vec::new();
     match spool.quarantine_legacy() {
-        Ok(Some(_)) => warnings.push("legacy unrouted queue moved to quarantine".to_string()),
+        Ok(Some(_)) => notes.push((
+            log::Tone::Warning,
+            log::attributed("queue", "Old pre-route queue was set aside"),
+        )),
         Ok(None) => {}
-        Err(error) => warnings.push(format!("could not quarantine legacy queue: {error}")),
+        Err(_) => notes.push((
+            log::Tone::Error,
+            log::attributed("queue", "Old pre-route queue could not be moved"),
+        )),
     }
 
     let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
@@ -345,12 +347,8 @@ fn scan_and_ship(
     let mut offsets_changed = false;
     for file in files {
         if let Some(note) = file.route_warning {
-            if file.advance_unrouted {
-                if !skip_notes.contains(&note) {
-                    skip_notes.push(note);
-                }
-            } else {
-                warnings.push(note);
+            if !skip_notes.contains(&note) {
+                skip_notes.push(note);
             }
         }
         match file.route {
@@ -361,10 +359,9 @@ fn scan_and_ship(
                     offsets.set(file.offset_key, file.next_offset);
                     offsets_changed = true;
                 }
-                Err(error) => warnings.push(format!(
-                    "could not queue {} records for {}: {error}",
-                    file.records.len(),
-                    route.label
+                Err(_) => notes.push((
+                    log::Tone::Error,
+                    log::attributed(&route.label, "Disk write to the spool failed"),
                 )),
             },
             None => {
@@ -376,38 +373,37 @@ fn scan_and_ship(
             }
         }
     }
-    let mut labels = Vec::new();
     if !summary_records.is_empty() {
-        labels.push(capture::thread_summary(&summary_records));
+        pass.threads = Some(capture::thread_summary(&summary_records));
     }
-    labels.extend(skip_notes);
-    if !labels.is_empty() {
-        pass.threads = Some(labels.join(", "));
+    for note in skip_notes {
+        notes.push((log::Tone::Warning, note));
     }
     if offsets_changed {
-        if let Err(e) = offsets.save() {
-            warnings.push(format!("could not save offsets: {e}"));
+        if offsets.save().is_err() {
+            notes.push((
+                log::Tone::Error,
+                log::attributed("observer", "Progress file did not write"),
+            ));
         }
     }
-    let (uploaded, drain_warnings) = drain(cfg, spool);
+    let (uploaded, drain_notes) = drain(cfg, spool);
     pass.uploaded = uploaded;
-    warnings.extend(drain_warnings);
-    if !warnings.is_empty() {
-        const MAX_WARNINGS: usize = 3;
-        let extra = warnings.len().saturating_sub(MAX_WARNINGS);
-        warnings.truncate(MAX_WARNINGS);
-        if extra > 0 {
-            warnings.push(format!("{extra} more warning(s)"));
-        }
-        pass.warn = Some(warnings.join("; "));
+    notes.extend(drain_notes);
+    const MAX_NOTES: usize = 3;
+    if notes.len() > MAX_NOTES {
+        let extra = notes.len() - MAX_NOTES;
+        notes.truncate(MAX_NOTES);
+        notes.push((log::Tone::Warning, format!("+{extra} more")));
     }
+    pass.notes = notes;
     pass
 }
 
 /// Drain each customer independently so one blocked route cannot stall others.
-fn drain(cfg: &Config, spool: &Spool) -> (usize, Vec<String>) {
+fn drain(cfg: &Config, spool: &Spool) -> (usize, Vec<(log::Tone, String)>) {
     let mut uploaded = 0;
-    let mut warnings = Vec::new();
+    let mut notes = Vec::new();
     for queued in spool.routes() {
         if !destination::route_allowed(&queued.route, &cfg.allow_repos) {
             continue;
@@ -415,10 +411,10 @@ fn drain(cfg: &Config, spool: &Spool) -> (usize, Vec<String>) {
         loop {
             let batch = match spool.peek(&queued.route, cfg.batch) {
                 Ok(batch) => batch,
-                Err(error) => {
-                    warnings.push(format!(
-                        "{} queue is blocked by corrupt data: {error}",
-                        queued.route.label
+                Err(_) => {
+                    notes.push((
+                        log::Tone::Error,
+                        log::attributed(&queued.route.label, "A queued file is unreadable"),
                     ));
                     break;
                 }
@@ -428,27 +424,36 @@ fn drain(cfg: &Config, spool: &Spool) -> (usize, Vec<String>) {
             }
             match uploader::send(&cfg.device_id, &queued.route, &batch) {
                 uploader::Upload::Ok => {
-                    if let Err(error) = spool.drop_front(&queued.route, batch.len()) {
-                        warnings.push(format!(
-                            "{} uploaded but queue could not advance: {error}",
-                            queued.route.label
+                    if spool.drop_front(&queued.route, batch.len()).is_err() {
+                        notes.push((
+                            log::Tone::Error,
+                            log::attributed(
+                                &queued.route.label,
+                                "Send worked, local delete failed",
+                            ),
                         ));
                         break;
                     }
                     uploaded += batch.len();
                 }
                 uploader::Upload::Retry(reason) => {
-                    warnings.push(format!("{reason} — retrying"));
+                    notes.push((
+                        log::Tone::Warning,
+                        log::attributed(&queued.route.label, &reason),
+                    ));
                     break;
                 }
                 uploader::Upload::Blocked(reason) => {
-                    warnings.push(format!("{reason} — records retained"));
+                    notes.push((
+                        log::Tone::Error,
+                        log::attributed(&queued.route.label, &reason),
+                    ));
                     break;
                 }
             }
         }
     }
-    (uploaded, warnings)
+    (uploaded, notes)
 }
 
 fn docs_cmd(args: &[String]) -> Result<()> {

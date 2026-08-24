@@ -34,11 +34,10 @@ pub fn send(device_id: &str, route: &RouteRef, records: &[Record]) -> Upload {
     }
     let credentials = match destination::read_credentials(route) {
         Ok(credentials) => credentials,
-        Err(error) => {
-            return Upload::Blocked(format!(
-                "{} credentials unavailable or changed: {error}",
-                route.label
-            ))
+        Err(_) => {
+            return Upload::Blocked(
+                "Dest file gone or URL/org changed after queue".into(),
+            )
         }
     };
     match verify_org(route, &credentials.api_key) {
@@ -52,7 +51,7 @@ pub fn send(device_id: &str, route: &RouteRef, records: &[Record]) -> Upload {
         records,
     }) {
         Ok(b) => b,
-        Err(e) => return Upload::Blocked(format!("could not serialize batch: {e}")),
+        Err(_) => return Upload::Blocked("Could not serialize the batch".into()),
     };
 
     let endpoint = format!("{}{INGEST_PATH}", route.api_url);
@@ -98,15 +97,12 @@ fn verify_org(route: &RouteRef, api_key: &str) -> Upload {
         .and_then(|body| serde_json::from_str(&body).map_err(|error| error.to_string()))
     {
         Ok(principal) => principal,
-        Err(error) => {
-            return Upload::Blocked(format!(
-                "{} identity response was invalid: {error}",
-                route.label
-            ))
+        Err(_) => {
+            return Upload::Blocked("The /api/v1/me body was not usable".into())
         }
     };
     if principal.organization_id.as_deref() != Some(route.org_id.as_str()) {
-        return Upload::Blocked(format!("{} organization verification failed", route.label));
+        return Upload::Blocked("Key's org does not match KHOTAN_ORG_ID".into());
     }
     if let Ok(mut verified) = cache.lock() {
         verified.insert(cache_key, Instant::now());
@@ -130,13 +126,13 @@ fn classify_response(response: Result<ureq::Response, ureq::Error>, operation: &
     }
 }
 
-fn classify_error(error: ureq::Error, operation: &str) -> Upload {
+fn classify_error(error: ureq::Error, _operation: &str) -> Upload {
     match error {
         ureq::Error::Status(code, _) if (500..=599).contains(&code) || code == 429 => {
-            Upload::Retry(format!("{operation} returned {code}"))
+            Upload::Retry("Server error or rate limit".into())
         }
-        ureq::Error::Status(code, _) => {
-            Upload::Blocked(format!("{operation} rejected the request with {code}"))
+        ureq::Error::Status(_, _) => {
+            Upload::Blocked("Key or request refused. Queue keeps the lines".into())
         }
         error => Upload::Retry(transport_reason(&error)),
     }
@@ -147,13 +143,14 @@ fn transport_reason(e: &ureq::Error) -> String {
     let raw = e.to_string();
     let lower = raw.to_lowercase();
     if lower.contains("connection refused") {
-        "endpoint unreachable (connection refused)".into()
+        "Host is up in DNS, port is closed".into()
     } else if lower.contains("timed out") || lower.contains("timeout") {
-        "endpoint timed out".into()
+        "No answer in time".into()
     } else if lower.contains("dns") || lower.contains("resolve") {
-        "could not resolve endpoint host".into()
+        "DNS failed".into()
     } else {
-        format!("upload failed: {raw}")
+        let _ = raw;
+        "Upload failed".into()
     }
 }
 

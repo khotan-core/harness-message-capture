@@ -122,23 +122,43 @@ fn read_file(
     let (route, route_warning, advance_unrouted) = match workspace_result {
         Err(_) => (
             None,
-            Some(format!("{project} · matched two folders, nothing sent")),
+            Some(crate::log::attributed(
+                &project,
+                "Same encoded path matches two checkouts",
+            )),
             false,
         ),
         Ok(Some(workspace)) if !destination::workspace_allowed(&workspace, allow_repos) => {
-            (None, None, true)
+            let name = workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| project.clone());
+            (
+                None,
+                Some(crate::log::attributed(
+                    &name,
+                    "Repo is real, but not on the allow list",
+                )),
+                true,
+            )
         }
         Ok(Some(workspace)) => match destination::resolve(&workspace) {
             Ok(route) => (route, None, true),
             Err(_) => (
                 None,
-                Some(format!("{project} · dest file broken, nothing sent")),
+                Some(crate::log::attributed(
+                    &project,
+                    "Repo found, dest file missing fields or conflicts",
+                )),
                 false,
             ),
         },
         Ok(None) => (
             None,
-            Some(format!("{project} · no repo on this machine, nothing sent")),
+            Some(crate::log::attributed(
+                &project,
+                "Chat has no project folder",
+            )),
             true,
         ),
     };
@@ -242,7 +262,7 @@ pub fn humanize_workspace_slug(slug: &str) -> String {
 }
 
 /// Compact summary of which workspaces/threads a capture batch touched, with
-/// the source harness, e.g. `harness-message-capture (cursor)×3, khotan (claude)`.
+/// the source harness, e.g. `harness-message-capture (cursor) +3, khotan (claude)`.
 pub fn thread_summary(records: &[Record]) -> String {
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -260,7 +280,7 @@ pub fn thread_summary(records: &[Record]) -> String {
             if n == 1 {
                 label
             } else {
-                format!("{label}×{n}")
+                format!("{label} +{n}")
             }
         })
         .collect::<Vec<_>>()
@@ -332,7 +352,7 @@ mod tests {
             rec("harness-message-capture"),
             rec("khotan"),
         ]);
-        assert_eq!(s, "harness-message-capture (cursor)×2, khotan (cursor)");
+        assert_eq!(s, "harness-message-capture (cursor) +2, khotan (cursor)");
     }
 
     #[test]
@@ -389,7 +409,7 @@ mod tests {
         assert!(!blocked[0].advance_unrouted);
         assert_eq!(
             blocked[0].route_warning.as_deref(),
-            Some("customer · dest file broken, nothing sent")
+            Some("customer (Repo found, dest file missing fields or conflicts)")
         );
 
         let skipped = collect_new(
@@ -404,7 +424,10 @@ mod tests {
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].route.is_none());
         assert!(skipped[0].advance_unrouted);
-        assert!(skipped[0].route_warning.is_none());
+        assert_eq!(
+            skipped[0].route_warning.as_deref(),
+            Some("customer (Repo is real, but not on the allow list)")
+        );
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -436,7 +459,7 @@ mod tests {
         assert!(captured[0].advance_unrouted);
         assert_eq!(
             captured[0].route_warning.as_deref(),
-            Some("empty-window · no repo on this machine, nothing sent")
+            Some("empty-window (Chat has no project folder)")
         );
         let _ = fs::remove_dir_all(temp);
     }
