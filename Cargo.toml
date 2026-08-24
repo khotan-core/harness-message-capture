@@ -1,6 +1,6 @@
 [package]
 name = "harness-message-capture"
-version = "0.1.20"
+version = "0.1.21"
 edition = "2021"
 description = "Tiny background daemon that captures local AI coding-agent transcripts and ships them to a remote endpoint."
 license = "UNLICENSED"
