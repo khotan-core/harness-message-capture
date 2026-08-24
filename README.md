@@ -75,24 +75,26 @@ Running in the foreground shows what it's doing:
 
   ✓ Watching in 3ms  · Ctrl-C to stop
 
-  15:53:05   captured 12   uploaded 12   harness-message-capture
+  15:53:05   harness-message-capture   captured 12   uploaded 12
   15:58:05   idle (No new lines this pass · 3,952 files)
 ```
 
 If GitHub has a newer tagged release, `run` prints an orange warn after
 the banner. Capture still starts.
 
-When several workspaces contribute in one pass, counts read as an add:
+Each workspace prints on its own line. Counts on that line belong to that
+folder only:
 
 ```
-  16:30:09   captured 13   uploaded 13   harness-message-capture +10, khotan +3
+  16:30:09   harness-message-capture   captured 10   uploaded 10
+  16:30:09   khotan   captured 3   uploaded 3
 ```
 
 If a customer endpoint is unreachable, nothing is lost. That customer's
 records stay in its local queue. Other customers keep draining:
 
 ```
-  15:52:47   captured 5   queued 531   podium-automation (Host is up in DNS, port is closed)
+  15:52:47   podium-automation   captured 5   queued 531   (Host is up in DNS, port is closed)
 ```
 
 Background mode writes the same log to

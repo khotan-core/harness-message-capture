@@ -22,6 +22,7 @@ use capture::Offsets;
 use config::Config;
 use notify::{RecursiveMode, Watcher};
 use spool::Spool;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -336,7 +337,7 @@ fn run_once() -> Result<()> {
     let mut offsets = Offsets::load();
     let spool = Spool::open();
     let pass = scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
-    if !report(pass, &spool) {
+    if !report(pass) {
         log::idle(offsets.len(), spool.pending());
     }
     Ok(())
@@ -399,7 +400,7 @@ fn watch() -> Result<()> {
     update::warn_if_stale();
 
     // Catch up on anything appended while we were stopped.
-    report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool), &spool);
+    report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool));
 
     let mut last_output = std::time::Instant::now();
     loop {
@@ -411,13 +412,13 @@ fn watch() -> Result<()> {
                 // Debounce a burst of writes, then coalesce into one scan.
                 std::thread::sleep(Duration::from_millis(300));
                 while rx.try_recv().is_ok() {}
-                if report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool), &spool) {
+                if report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool)) {
                     last_output = std::time::Instant::now();
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Fallback pass: covers missed events and retries the spool.
-                if report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool), &spool) {
+                if report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool)) {
                     last_output = std::time::Instant::now();
                 }
             }
@@ -434,30 +435,24 @@ fn watch() -> Result<()> {
 /// Outcome of one capture + upload pass.
 #[derive(Default)]
 struct Pass {
-    captured: usize,
-    uploaded: usize,
-    skipped: usize,
-    /// Human-readable workspace/thread labels touched this pass.
-    threads: Option<String>,
-    notes: Vec<(log::Tone, String)>,
+    lines: Vec<log::Activity>,
 }
 
-/// Print a line for any pass that did something. Returns whether it printed.
-fn report(pass: Pass, spool: &Spool) -> bool {
-    if pass.captured == 0 && pass.uploaded == 0 && pass.skipped == 0 && pass.notes.is_empty() {
+fn repo_entry<'a>(
+    repos: &'a mut BTreeMap<String, log::Activity>,
+    label: &str,
+) -> &'a mut log::Activity {
+    repos
+        .entry(label.to_string())
+        .or_insert_with(|| log::Activity::new(label))
+}
+
+/// Print one line per workspace that did something. Returns whether it printed.
+fn report(pass: Pass) -> bool {
+    if pass.lines.is_empty() {
         return false;
     }
-    let mut notes = pass.notes;
-    if let Some(threads) = pass.threads.filter(|s| !s.is_empty()) {
-        notes.insert(0, (log::Tone::Delivery, threads));
-    }
-    log::activity(
-        pass.captured,
-        pass.uploaded,
-        pass.skipped,
-        spool.pending(),
-        &notes,
-    );
+    log::activities(&pass.lines);
     true
 }
 
@@ -467,96 +462,100 @@ fn scan_and_ship(
     offsets: &mut Offsets,
     spool: &Spool,
 ) -> Pass {
-    let mut pass = Pass::default();
-    let mut notes: Vec<(log::Tone, String)> = Vec::new();
+    let mut observer: Vec<log::Activity> = Vec::new();
     match spool.quarantine_legacy() {
-        Ok(Some(_)) => notes.push((
-            log::Tone::Warning,
-            log::attributed("queue", "Old pre-route queue was set aside"),
-        )),
+        Ok(Some(_)) => {
+            let mut line = log::Activity::new("queue");
+            line.set_means(log::Tone::Warning, "Old pre-route queue was set aside");
+            observer.push(line);
+        }
         Ok(None) => {}
-        Err(_) => notes.push((
-            log::Tone::Error,
-            log::attributed("queue", "Old pre-route queue could not be moved"),
-        )),
+        Err(_) => {
+            let mut line = log::Activity::new("queue");
+            line.set_means(log::Tone::Error, "Old pre-route queue could not be moved");
+            observer.push(line);
+        }
     }
 
     let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
     let files = capture::collect_new(srcs, offsets, &workspaces, &cfg.allow_repos);
-    let mut summary_records = Vec::new();
-    let mut skip_notes = Vec::new();
+    let mut repos: BTreeMap<String, log::Activity> = BTreeMap::new();
     let mut offsets_changed = false;
     for file in files {
-        if let Some(note) = file.route_warning {
-            if !skip_notes.contains(&note) {
-                skip_notes.push(note);
-            }
-        }
         match file.route {
             Some(route) => match spool.append(&route, &file.records) {
                 Ok(()) => {
-                    pass.captured += file.records.len();
-                    summary_records.extend(file.records);
+                    repo_entry(&mut repos, &route.label).captured += file.records.len();
                     offsets.set(file.offset_key, file.next_offset);
                     offsets_changed = true;
                 }
-                Err(_) => notes.push((
-                    log::Tone::Error,
-                    log::attributed(&route.label, "Disk write to the spool failed"),
-                )),
+                Err(_) => {
+                    repo_entry(&mut repos, &route.label)
+                        .set_means(log::Tone::Error, "Disk write to the spool failed");
+                }
             },
             None => {
+                if let Some(warn) = file.route_warning {
+                    let entry = repo_entry(&mut repos, &warn.label);
+                    entry.skipped += file.records.len();
+                    entry.set_means(log::Tone::Warning, warn.means);
+                }
                 if file.advance_unrouted {
-                    pass.skipped += file.records.len();
                     offsets.set(file.offset_key, file.next_offset);
                     offsets_changed = true;
                 }
             }
         }
     }
-    if !summary_records.is_empty() {
-        pass.threads = Some(capture::thread_summary(&summary_records));
-    }
-    for note in skip_notes {
-        notes.push((log::Tone::Warning, note));
-    }
     if offsets_changed {
         if offsets.save().is_err() {
-            notes.push((
-                log::Tone::Error,
-                log::attributed("observer", "Progress file did not write"),
-            ));
+            let mut line = log::Activity::new("observer");
+            line.set_means(log::Tone::Error, "Progress file did not write");
+            observer.push(line);
         }
     }
-    let (uploaded, drain_notes) = drain(cfg, spool);
-    pass.uploaded = uploaded;
-    notes.extend(drain_notes);
-    const MAX_NOTES: usize = 3;
-    if notes.len() > MAX_NOTES {
-        let extra = notes.len() - MAX_NOTES;
-        notes.truncate(MAX_NOTES);
-        notes.push((log::Tone::Warning, format!("+{extra} more")));
+    for (label, uploaded) in drain(cfg, spool) {
+        let entry = repo_entry(&mut repos, &label);
+        if uploaded.count > 0 {
+            entry.uploaded += uploaded.count;
+        }
+        if let Some((tone, means)) = uploaded.means {
+            entry.set_means(tone, means);
+        }
     }
-    pass.notes = notes;
-    pass
+    for queued in spool.routes() {
+        if let Some(entry) = repos.get_mut(&queued.route.label) {
+            entry.queued = queued.pending;
+        }
+    }
+    let mut lines: Vec<log::Activity> = repos
+        .into_values()
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines = log::fold_skips(lines, log::MAX_SKIP_LINES);
+    lines.extend(observer);
+    Pass { lines }
+}
+
+struct DrainResult {
+    count: usize,
+    means: Option<(log::Tone, String)>,
 }
 
 /// Drain each customer independently so one blocked route cannot stall others.
-fn drain(cfg: &Config, spool: &Spool) -> (usize, Vec<(log::Tone, String)>) {
-    let mut uploaded = 0;
-    let mut notes = Vec::new();
+fn drain(cfg: &Config, spool: &Spool) -> BTreeMap<String, DrainResult> {
+    let mut by_label: BTreeMap<String, DrainResult> = BTreeMap::new();
     for queued in spool.routes() {
         if !destination::route_allowed(&queued.route, &cfg.allow_repos) {
             continue;
         }
+        let mut count = 0;
+        let mut means = None;
         loop {
             let batch = match spool.peek(&queued.route, cfg.batch) {
                 Ok(batch) => batch,
                 Err(_) => {
-                    notes.push((
-                        log::Tone::Error,
-                        log::attributed(&queued.route.label, "A queued file is unreadable"),
-                    ));
+                    means = Some((log::Tone::Error, "A queued file is unreadable".to_string()));
                     break;
                 }
             };
@@ -566,35 +565,29 @@ fn drain(cfg: &Config, spool: &Spool) -> (usize, Vec<(log::Tone, String)>) {
             match uploader::send(&cfg.device_id, &queued.route, &batch) {
                 uploader::Upload::Ok => {
                     if spool.drop_front(&queued.route, batch.len()).is_err() {
-                        notes.push((
+                        means = Some((
                             log::Tone::Error,
-                            log::attributed(
-                                &queued.route.label,
-                                "Send worked, local delete failed",
-                            ),
+                            "Send worked, local delete failed".to_string(),
                         ));
                         break;
                     }
-                    uploaded += batch.len();
+                    count += batch.len();
                 }
                 uploader::Upload::Retry(reason) => {
-                    notes.push((
-                        log::Tone::Warning,
-                        log::attributed(&queued.route.label, &reason),
-                    ));
+                    means = Some((log::Tone::Warning, reason));
                     break;
                 }
                 uploader::Upload::Blocked(reason) => {
-                    notes.push((
-                        log::Tone::Error,
-                        log::attributed(&queued.route.label, &reason),
-                    ));
+                    means = Some((log::Tone::Error, reason));
                     break;
                 }
             }
         }
+        if count > 0 || means.is_some() {
+            by_label.insert(queued.route.label.clone(), DrainResult { count, means });
+        }
     }
-    (uploaded, notes)
+    by_label
 }
 
 fn docs_cmd(args: &[String]) -> Result<()> {

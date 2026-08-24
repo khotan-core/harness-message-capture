@@ -10,7 +10,19 @@ Deliveries print in green. Warnings print in orange. Errors print in red.
 
 ## Activity lines
 
-`captured N` means new transcript lines were queued.
+Each workspace prints on its own line. Counts on that line belong to that
+folder only.
+
+`usi   skipped 432   queued 200   (Repo is real, but not on the allow list)`
+
+`usi` is the folder name. Those 432 lines were not sent. The 200 queued lines
+are leftovers from when that folder was allowed.
+
+`dev-serve-robotics   queued 188   (Host is up in DNS, port is closed)`
+
+The endpoint did not accept those 188 lines. They stay on disk.
+
+`captured N` means new transcript lines were written to the local queue.
 
 `uploaded N` means those lines were sent to the customer endpoint.
 
@@ -18,9 +30,9 @@ Deliveries print in green. Warnings print in orange. Errors print in red.
 
 `queued N` means lines wait on disk because the endpoint did not accept them.
 
-`idle (No new lines this pass · N files)` means the watcher is up and quiet.
+`+N more   skipped M` means more skip-only folders were folded off this pass.
 
-`harness-message-capture +10` means this pass added 10 lines from that folder.
+`idle (No new lines this pass · N files)` means the watcher is up and quiet.
 
 ## Startup warns (orange)
 

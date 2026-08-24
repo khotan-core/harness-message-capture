@@ -39,5 +39,6 @@ mod tests {
         assert!(HELP.contains("Send worked, local delete failed"));
         assert!(HELP.contains("Newer observer"));
         assert!(HELP.contains("khotan-observer docs"));
+        assert!(HELP.contains("usi   skipped"));
     }
 }

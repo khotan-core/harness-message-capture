@@ -251,52 +251,132 @@ pub fn banner(sources: &[&str], routes: usize, allow: &[String], ready_ms: u128)
     eprintln!();
 }
 
-/// One activity line: what was captured, what got delivered, and any delivery
-/// backlog. A healthy empty queue is intentionally omitted.
-/// `threads` is an optional workspace/chat label summary (e.g. `harness-message-capture (cursor)`).
-pub fn activity(
-    captured: usize,
-    uploaded: usize,
-    skipped: usize,
-    spool: usize,
-    notes: &[(Tone, String)],
-) {
-    let mut parts: Vec<String> = Vec::new();
-    if captured > 0 {
-        parts.push(format!(
-            "{} {}",
-            "captured".if_supports_color(Stderr, |t| t.dimmed()),
-            captured,
-        ));
-    }
-    if uploaded > 0 {
-        parts.push(format!(
-            "{} {}",
-            "uploaded".if_supports_color(Stderr, |t| t.dimmed()),
-            green(&uploaded.to_string()),
-        ));
-    }
-    if skipped > 0 {
-        parts.push(format!(
-            "{} {}",
-            "skipped".if_supports_color(Stderr, |t| t.dimmed()),
-            orange(&skipped.to_string()),
-        ));
-    }
-    // A backlog only matters when delivery could not complete; don't clutter
-    // healthy capture lines with an implementation detail.
-    if spool > 0 {
-        parts.push(format!(
-            "{} {}",
-            "queued".if_supports_color(Stderr, |t| t.dimmed()),
-            orange(&spool.to_string()),
-        ));
-    }
-    for (tone, note) in notes {
-        parts.push(paint(*tone, note));
+/// One workspace's counts and reason for a single scan pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Activity {
+    pub label: String,
+    pub captured: usize,
+    pub uploaded: usize,
+    pub skipped: usize,
+    pub queued: usize,
+    pub tone: Tone,
+    pub means: Option<String>,
+}
+
+impl Activity {
+    pub fn new(label: impl Into<String>) -> Activity {
+        Activity {
+            label: label.into(),
+            captured: 0,
+            uploaded: 0,
+            skipped: 0,
+            queued: 0,
+            tone: Tone::Delivery,
+            means: None,
+        }
     }
 
-    eprintln!("  {}   {}", dim(&clock()), parts.join("   "));
+    pub fn set_means(&mut self, tone: Tone, means: impl Into<String>) {
+        if tone_rank(tone) >= tone_rank(self.tone) {
+            self.tone = tone;
+            self.means = Some(means.into());
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.captured == 0
+            && self.uploaded == 0
+            && self.skipped == 0
+            && self.queued == 0
+            && self.means.is_none()
+    }
+
+    fn is_skip_only(&self) -> bool {
+        self.captured == 0 && self.uploaded == 0 && self.queued == 0 && self.skipped > 0
+    }
+
+    fn render(&self) -> String {
+        let mut parts = vec![paint(self.tone, &self.label)];
+        if self.captured > 0 {
+            parts.push(format!(
+                "{} {}",
+                "captured".if_supports_color(Stderr, |t| t.dimmed()),
+                self.captured,
+            ));
+        }
+        if self.uploaded > 0 {
+            parts.push(format!(
+                "{} {}",
+                "uploaded".if_supports_color(Stderr, |t| t.dimmed()),
+                green(&self.uploaded.to_string()),
+            ));
+        }
+        if self.skipped > 0 {
+            parts.push(format!(
+                "{} {}",
+                "skipped".if_supports_color(Stderr, |t| t.dimmed()),
+                orange(&self.skipped.to_string()),
+            ));
+        }
+        if self.queued > 0 {
+            parts.push(format!(
+                "{} {}",
+                "queued".if_supports_color(Stderr, |t| t.dimmed()),
+                orange(&self.queued.to_string()),
+            ));
+        }
+        if let Some(means) = &self.means {
+            parts.push(paint(self.tone, &format!("({means})")));
+        }
+        parts.join("   ")
+    }
+}
+
+fn tone_rank(tone: Tone) -> u8 {
+    match tone {
+        Tone::Delivery => 0,
+        Tone::Warning => 1,
+        Tone::Error => 2,
+    }
+}
+
+/// How many skip-only repos print in full before they fold into `+N more`.
+pub const MAX_SKIP_LINES: usize = 8;
+
+/// Keep every capture, upload, queue, or error line. Fold extra skip-only
+/// lines so a first-time catch-up does not flood the log.
+pub fn fold_skips(lines: Vec<Activity>, max_skips: usize) -> Vec<Activity> {
+    let (mut keep, mut skip_only): (Vec<_>, Vec<_>) =
+        lines.into_iter().partition(|line| !line.is_skip_only());
+    keep.sort_by(|left, right| left.label.cmp(&right.label));
+    skip_only.sort_by(|left, right| {
+        right
+            .skipped
+            .cmp(&left.skipped)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    if skip_only.len() > max_skips {
+        let rest = skip_only.split_off(max_skips);
+        let extra = rest.len();
+        let mut more = Activity::new(format!("+{extra} more"));
+        more.skipped = rest.iter().map(|line| line.skipped).sum();
+        more.queued = rest.iter().map(|line| line.queued).sum();
+        more.tone = Tone::Warning;
+        skip_only.push(more);
+    }
+    keep.extend(skip_only);
+    keep
+}
+
+/// One line per workspace, sharing one timestamp for the pass.
+pub fn activities(lines: &[Activity]) {
+    let stamp = dim(&clock());
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        eprintln!("  {stamp}   {}", line.render());
+    }
 }
 
 /// Periodic proof-of-life while nothing is being written.
@@ -400,6 +480,55 @@ mod tests {
             super::attributed("podium-automation", "Send worked, local delete failed"),
             "podium-automation (Send worked, local delete failed)"
         );
+    }
+
+    fn skip_line(label: &str, skipped: usize) -> super::Activity {
+        let mut line = super::Activity::new(label);
+        line.skipped = skipped;
+        line.tone = super::Tone::Warning;
+        line.means = Some("Repo is real, but not on the allow list".into());
+        line
+    }
+
+    #[test]
+    fn render_puts_counts_on_the_repo_line() {
+        let mut line = skip_line("usi", 432);
+        line.queued = 200;
+        assert_eq!(
+            line.render(),
+            "usi   skipped 432   queued 200   (Repo is real, but not on the allow list)"
+        );
+    }
+
+    #[test]
+    fn render_keeps_a_delivery_failure_on_its_own_line() {
+        let mut line = super::Activity::new("dev-serve-robotics");
+        line.queued = 188;
+        line.set_means(super::Tone::Warning, "Host is up in DNS, port is closed");
+        assert_eq!(
+            line.render(),
+            "dev-serve-robotics   queued 188   (Host is up in DNS, port is closed)"
+        );
+    }
+
+    #[test]
+    fn fold_skips_keeps_queue_lines_and_caps_skip_only() {
+        let mut queued = super::Activity::new("dev-serve-robotics");
+        queued.queued = 188;
+        queued.set_means(super::Tone::Warning, "Host is up in DNS, port is closed");
+        let lines = vec![
+            skip_line("usi", 432),
+            skip_line("brain", 10),
+            skip_line("entry", 20),
+            queued,
+        ];
+        let folded = super::fold_skips(lines, 2);
+        assert_eq!(folded[0].label, "dev-serve-robotics");
+        assert_eq!(folded[0].queued, 188);
+        assert_eq!(folded[1].label, "usi");
+        assert_eq!(folded[2].label, "entry");
+        assert_eq!(folded[3].label, "+1 more");
+        assert_eq!(folded[3].skipped, 10);
     }
 
     #[test]

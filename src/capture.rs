@@ -51,13 +51,28 @@ impl Offsets {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteWarning {
+    pub label: String,
+    pub means: String,
+}
+
+impl RouteWarning {
+    fn new(label: impl Into<String>, means: impl Into<String>) -> RouteWarning {
+        RouteWarning {
+            label: label.into(),
+            means: means.into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CapturedFile {
     pub route: Option<RouteRef>,
     pub records: Vec<Record>,
     pub offset_key: String,
     pub next_offset: u64,
-    pub route_warning: Option<String>,
+    pub route_warning: Option<RouteWarning>,
     pub advance_unrouted: bool,
 }
 
@@ -122,7 +137,7 @@ fn read_file(
     let (route, route_warning, advance_unrouted) = match workspace_result {
         Err(_) => (
             None,
-            Some(crate::log::attributed(
+            Some(RouteWarning::new(
                 &project,
                 "Same encoded path matches two checkouts",
             )),
@@ -135,8 +150,8 @@ fn read_file(
                 .unwrap_or_else(|| project.clone());
             (
                 None,
-                Some(crate::log::attributed(
-                    &name,
+                Some(RouteWarning::new(
+                    name,
                     "Repo is real, but not on the allow list",
                 )),
                 true,
@@ -146,7 +161,7 @@ fn read_file(
             Ok(route) => (route, None, true),
             Err(_) => (
                 None,
-                Some(crate::log::attributed(
+                Some(RouteWarning::new(
                     &project,
                     "Repo found, dest file missing fields or conflicts",
                 )),
@@ -155,10 +170,7 @@ fn read_file(
         },
         Ok(None) => (
             None,
-            Some(crate::log::attributed(
-                &project,
-                "Chat has no project folder",
-            )),
+            Some(RouteWarning::new(&project, "Chat has no project folder")),
             true,
         ),
     };
@@ -261,32 +273,6 @@ pub fn humanize_workspace_slug(slug: &str) -> String {
     s.to_string()
 }
 
-/// Compact summary of which workspaces/threads a capture batch touched, with
-/// the source harness, e.g. `harness-message-capture (cursor) +3, khotan (claude)`.
-pub fn thread_summary(records: &[Record]) -> String {
-    use std::collections::BTreeMap;
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for r in records {
-        let label = if r.project.is_empty() {
-            r.tool.clone()
-        } else {
-            format!("{} ({})", r.project, r.tool)
-        };
-        *counts.entry(label).or_default() += 1;
-    }
-    counts
-        .into_iter()
-        .map(|(label, n)| {
-            if n == 1 {
-                label
-            } else {
-                format!("{label} +{n}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,24 +321,6 @@ mod tests {
         let (project, session) = provenance("cursor", &file, &root, None);
         assert_eq!(project, "harness-message-capture");
         assert_eq!(session, "76a56200-c845-4f62-b741-ca6237573ade");
-    }
-
-    #[test]
-    fn thread_summary_counts_per_project() {
-        let rec = |project: &str| Record {
-            schema: "v1".into(),
-            tool: "cursor".into(),
-            project: project.into(),
-            session_id: "s".into(),
-            captured_at_ms: 1,
-            line: "{}".into(),
-        };
-        let s = thread_summary(&[
-            rec("harness-message-capture"),
-            rec("harness-message-capture"),
-            rec("khotan"),
-        ]);
-        assert_eq!(s, "harness-message-capture (cursor) +2, khotan (cursor)");
     }
 
     #[test]
@@ -408,8 +376,11 @@ mod tests {
         assert_eq!(blocked.len(), 1);
         assert!(!blocked[0].advance_unrouted);
         assert_eq!(
-            blocked[0].route_warning.as_deref(),
-            Some("customer (Repo found, dest file missing fields or conflicts)")
+            blocked[0].route_warning,
+            Some(RouteWarning::new(
+                "customer",
+                "Repo found, dest file missing fields or conflicts"
+            ))
         );
 
         let skipped = collect_new(
@@ -425,8 +396,11 @@ mod tests {
         assert!(skipped[0].route.is_none());
         assert!(skipped[0].advance_unrouted);
         assert_eq!(
-            skipped[0].route_warning.as_deref(),
-            Some("customer (Repo is real, but not on the allow list)")
+            skipped[0].route_warning,
+            Some(RouteWarning::new(
+                "customer",
+                "Repo is real, but not on the allow list"
+            ))
         );
         let _ = fs::remove_dir_all(temp);
     }
@@ -458,8 +432,11 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert!(captured[0].advance_unrouted);
         assert_eq!(
-            captured[0].route_warning.as_deref(),
-            Some("empty-window (Chat has no project folder)")
+            captured[0].route_warning,
+            Some(RouteWarning::new(
+                "empty-window",
+                "Chat has no project folder"
+            ))
         );
         let _ = fs::remove_dir_all(temp);
     }
