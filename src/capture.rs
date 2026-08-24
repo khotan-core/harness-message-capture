@@ -120,17 +120,25 @@ fn read_file(
         .and_then(|path| path.as_deref());
     let (project, session_id) = provenance(src.tool, file, &src.root, workspace);
     let (route, route_warning, advance_unrouted) = match workspace_result {
-        Err(error) => (None, Some(format!("{project}: {error}")), false),
+        Err(_) => (
+            None,
+            Some(format!("{project} · matched two folders, nothing sent")),
+            false,
+        ),
         Ok(Some(workspace)) if !destination::workspace_allowed(&workspace, allow_repos) => {
             (None, None, true)
         }
         Ok(Some(workspace)) => match destination::resolve(&workspace) {
             Ok(route) => (route, None, true),
-            Err(error) => (None, Some(format!("{}: {error}", project)), false),
+            Err(_) => (
+                None,
+                Some(format!("{project} · dest file broken, nothing sent")),
+                false,
+            ),
         },
         Ok(None) => (
             None,
-            Some(format!("{project}: workspace path could not be resolved")),
+            Some(format!("{project} · no repo on this machine, nothing sent")),
             true,
         ),
     };
@@ -379,7 +387,10 @@ mod tests {
         );
         assert_eq!(blocked.len(), 1);
         assert!(!blocked[0].advance_unrouted);
-        assert!(blocked[0].route_warning.is_some());
+        assert_eq!(
+            blocked[0].route_warning.as_deref(),
+            Some("customer · dest file broken, nothing sent")
+        );
 
         let skipped = collect_new(
             &[Source {
@@ -394,6 +405,39 @@ mod tests {
         assert!(skipped[0].route.is_none());
         assert!(skipped[0].advance_unrouted);
         assert!(skipped[0].route_warning.is_none());
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn unresolved_workspace_explains_skip() {
+        let temp = temp_dir("unresolved");
+        let source_root = temp.join("cursor-projects");
+        let transcript = source_root
+            .join("Users-adeep-Developer-empty-window")
+            .join("agent-transcripts")
+            .join("session")
+            .join("session.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, "{\"role\":\"user\"}\n").unwrap();
+        let offsets = Offsets {
+            map: HashMap::new(),
+            path: temp.join("offsets.json"),
+        };
+        let captured = collect_new(
+            &[Source {
+                tool: "cursor",
+                root: source_root,
+            }],
+            &offsets,
+            &WorkspaceIndex::from_candidates(vec![]),
+            &["empty-window".into()],
+        );
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].advance_unrouted);
+        assert_eq!(
+            captured[0].route_warning.as_deref(),
+            Some("empty-window · no repo on this machine, nothing sent")
+        );
         let _ = fs::remove_dir_all(temp);
     }
 }

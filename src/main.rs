@@ -2,6 +2,7 @@ mod agent;
 mod capture;
 mod config;
 mod destination;
+mod docs;
 mod log;
 mod reader;
 mod receiver;
@@ -45,6 +46,7 @@ fn run() -> Result<()> {
         "receive" => receive_cmd(&args[2..]),
         "read" => read_cmd(&args[2..]),
         "clear-queue" => clear_queue(&args[2..]),
+        "docs" => docs_cmd(&args[2..]),
         _ => {
             print_help();
             Ok(())
@@ -64,6 +66,7 @@ fn print_help() {
            khotan-observer logs         Follow the background log\n\
            khotan-observer uninstall    Stop & remove the LaunchAgent\n\
            khotan-observer status       Show config, sources, and spool state\n\
+           khotan-observer docs         What status and log lines mean\n\
            khotan-observer run-once     Single scan + upload pass, then exit\n\
            khotan-observer receive      Local ingest server (writes to an inbox dir)\n\
            khotan-observer read         Inspect messages stored in the inbox\n\
@@ -115,6 +118,10 @@ fn configure(args: &[String]) -> Result<()> {
     cfg.save()?;
     println!("configured. device_id={}", cfg.device_id);
     println!("config: {}", config::config_path().display());
+    match docs::write() {
+        Ok(path) => println!("docs: {}", path.display()),
+        Err(error) => eprintln!("could not write docs: {error}"),
+    }
     if cfg.allow_repos.is_empty() {
         println!("allow_repos: none — add one with: khotan-observer configure --allow-repo <folder>");
     } else {
@@ -150,6 +157,7 @@ fn status() -> Result<()> {
         println!("  {}", root.display());
     }
     println!("config    : {}", config::config_path().display());
+    println!("docs      : {}", docs::docs_path().display());
     if cfg.allow_repos.is_empty() {
         println!("allow     : none — khotan-observer configure --allow-repo <folder>");
     } else {
@@ -335,10 +343,17 @@ fn scan_and_ship(
     let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
     let files = capture::collect_new(srcs, offsets, &workspaces, &cfg.allow_repos);
     let mut summary_records = Vec::new();
+    let mut skip_notes = Vec::new();
     let mut offsets_changed = false;
     for file in files {
-        if let Some(warning) = file.route_warning {
-            warnings.push(format!("destination blocked: {warning}"));
+        if let Some(note) = file.route_warning {
+            if file.advance_unrouted {
+                if !skip_notes.contains(&note) {
+                    skip_notes.push(note);
+                }
+            } else {
+                warnings.push(note);
+            }
         }
         match file.route {
             Some(route) => match spool.append(&route, &file.records) {
@@ -363,8 +378,13 @@ fn scan_and_ship(
             }
         }
     }
+    let mut labels = Vec::new();
     if !summary_records.is_empty() {
-        pass.threads = Some(capture::thread_summary(&summary_records));
+        labels.push(capture::thread_summary(&summary_records));
+    }
+    labels.extend(skip_notes);
+    if !labels.is_empty() {
+        pass.threads = Some(labels.join(", "));
     }
     if offsets_changed {
         if let Err(e) = offsets.save() {
@@ -431,6 +451,21 @@ fn drain(cfg: &Config, spool: &Spool) -> (usize, Vec<String>) {
         }
     }
     (uploaded, warnings)
+}
+
+fn docs_cmd(args: &[String]) -> Result<()> {
+    match args {
+        [] => {
+            docs::print();
+            Ok(())
+        }
+        [flag] if flag == "--write" => {
+            let path = docs::write()?;
+            println!("docs: {}", path.display());
+            Ok(())
+        }
+        _ => anyhow::bail!("usage: khotan-observer docs [--write]"),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

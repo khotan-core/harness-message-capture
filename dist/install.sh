@@ -105,6 +105,7 @@ if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
 fi
 
 echo "==> Installed: $BIN_PATH"
+"$BIN_PATH" docs --write >/dev/null || true
 
 CONFIG="${HOME}/.config/harness-message-capture/config.toml"
 if [[ ! -f "$CONFIG" ]]; then

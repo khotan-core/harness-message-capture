@@ -5,7 +5,11 @@ alwaysApply: true
 
 # Ship observer releases
 
-Every change that lands on `main` must ship as a GitHub Release. Do not leave the user on a stale `~/.local/bin/khotan-observer`. Do this without asking.
+Every approved change must ship as a GitHub Release in the same turn. "Push", "ship", "land it", or "LGTM" all mean this full cycle. Do not stop after `git push origin main`. Do not leave `Cargo.toml` unbumped. Do not leave the user on a stale `~/.local/bin/khotan-observer`.
+
+## After the user approves
+
+Commit the change, then do the release steps below before you end the turn.
 
 ## After the code commit is on main
 

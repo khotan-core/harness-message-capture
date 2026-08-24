@@ -10,11 +10,30 @@ Crate name: `harness-message-capture`. Binary name: `khotan-observer`. Rust 2021
 
 The client stays dumb: it ships redacted raw JSONL plus provenance. The server parses per-tool semantics later. This is a consented employee install, not a stealth collector.
 
+## After the user approves a change
+
+Do this in the same turn. "Push", "ship", "land it", or "LGTM" all mean the full release. Do not stop after `git push origin main`.
+
+1. Commit the approved change.
+2. Bump the patch in `Cargo.toml` (`0.1.10` → `0.1.11`). Sync `Cargo.lock` and the version string in `README.md`.
+3. Commit `Release vX.Y.Z`.
+4. Create an annotated tag `vX.Y.Z` on that commit.
+5. Push both: `git push origin main` and `git push origin vX.Y.Z`.
+6. Wait until the Release workflow on that tag succeeds and the GitHub Release exists.
+7. Reinstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/khotan-core/harness-message-capture/main/dist/install.sh | bash
+```
+
+A push to `main` does not publish a binary. Only a `v*` tag does. Never leave `Cargo.toml` unbumped. Never leave `~/.local/bin/khotan-observer` on a stale build.
+
 ## Architecture
 
 | Module | Role |
 | --- | --- |
-| `src/main.rs` | CLI: `configure`, `run`, `start`, `stop`, `logs`, `uninstall`, `status`, `run-once`, `receive`, `read`, `clear-queue` |
+| `src/main.rs` | CLI: `configure`, `run`, `start`, `stop`, `logs`, `uninstall`, `status`, `docs`, `run-once`, `receive`, `read`, `clear-queue` |
+| `src/docs.rs` | Embedded log glossary from `dist/help.md`; `docs` and `docs --write` |
 | `src/sources.rs` | Discover transcript roots that exist on disk |
 | `src/workspace.rs` | Map a transcript path to a git checkout or worktree |
 | `src/destination.rs` | Load `env.khotan.local` / `.env.khotan.local` and verify org |
@@ -51,6 +70,7 @@ On-disk state:
 | Config | `~/.config/harness-message-capture/config.toml` |
 | Offsets and spool | `~/.local/state/harness-message-capture/` |
 | Installed binary | `~/.local/bin/khotan-observer` |
+| Log glossary | `~/.local/share/khotan-observer/help.md` |
 | LaunchAgent | `~/Library/LaunchAgents/com.khotan.observer.plist` |
 | Background log | `~/Library/Logs/khotan-observer.log` |
 

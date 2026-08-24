@@ -27,7 +27,8 @@ KHOTAN_OBSERVER_VERSION=v0.1.0 \
 
 The installer writes `~/.config/harness-message-capture/config.toml` with
 preset poll and batch values. The only setting you choose is which
-repositories may upload.
+repositories may upload. A log glossary ships in the binary. Run
+`khotan-observer docs`, or open `~/.local/share/khotan-observer/help.md`.
 
 ```bash
 khotan-observer configure --allow-repo podium-automation --allow-repo chief-nutrition
@@ -39,6 +40,7 @@ khotan-observer run
 khotan-observer start
 khotan-observer logs      # follow background activity
 khotan-observer status
+khotan-observer docs      # what status and log lines mean
 khotan-observer stop
 khotan-observer uninstall
 khotan-observer clear-queue --yes  # permanently discard unsent records
