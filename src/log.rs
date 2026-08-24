@@ -136,15 +136,16 @@ fn allow_line(allow: &[String], routes: usize) -> String {
 
 /// The Khotan wordmark, downsampled from the brand logo into half-block cells.
 /// Every row is `WORDMARK_COLS` characters wide.
-const WORDMARK: [&str; 5] = [
-    "▄▄   ▄▄  ▄▄   ▄▄    ▄▄▄▄  ▄▄▄▄▄▄  ▄▄     ▄▄   ▄▄",
-    "██ ▄█▀   ██   ██  ▄██▀▀██▄▀▀██▀▀ ███▄    ███  ██",
-    "████▄    ███████  ██    ██  ██  ▄████▄   ████▄██",
-    "██ ▀█▄   ██   ██  ▀█▄▄▄▄█▀  ██  ██▀▀██   ██ ▀███",
-    "▀▀  ▀▀▀  ▀▀   ▀▀   ▀▀▀▀▀    ▀▀ ▀▀    ▀▀  ▀▀   ▀▀",
+const WORDMARK: [&str; 6] = [
+    "██╗  ██╗██╗  ██╗ ██████╗ ████████╗ █████╗ ███╗   ██╗",
+    "██║ ██╔╝██║  ██║██╔═══██╗╚══██╔══╝██╔══██╗████╗  ██║",
+    "█████╔╝ ███████║██║   ██║   ██║   ███████║██╔██╗ ██║",
+    "██╔═██╗ ██╔══██║██║   ██║   ██║   ██╔══██║██║╚██╗██║",
+    "██║  ██╗██║  ██║╚██████╔╝   ██║   ██║  ██║██║ ╚████║",
+    "╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝",
 ];
 
-const WORDMARK_COLS: usize = 48;
+const WORDMARK_COLS: usize = 52;
 
 /// Art plus the two-space indent on each side.
 const WORDMARK_MIN_COLS: usize = WORDMARK_COLS + 4;
