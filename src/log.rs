@@ -84,23 +84,21 @@ fn stop_hint_for(mode: Option<&std::ffi::OsStr>) -> &'static str {
     }
 }
 
-fn allow_line(allow: &[String]) -> String {
+fn allow_line(allow: &[String], routes: usize) -> String {
     if allow.is_empty() {
-        "none".to_string()
-    } else {
-        allow.join(", ")
+        return "none".to_string();
     }
+    let names = allow.join(", ");
+    let ready = if routes == 1 {
+        "1 ready".to_string()
+    } else {
+        format!("{routes} ready")
+    };
+    format!("{names} · {ready}")
 }
 
 /// Startup summary printed once when the watcher comes up.
-pub fn banner(
-    device: &str,
-    sources: &[&str],
-    files: usize,
-    routes: usize,
-    allow: &[String],
-    ready_ms: u128,
-) {
+pub fn banner(sources: &[&str], routes: usize, allow: &[String], ready_ms: u128) {
     let version = env!("CARGO_PKG_VERSION");
     let src = if sources.is_empty() {
         "none found".to_string()
@@ -114,14 +112,8 @@ pub fn banner(
         version.if_supports_color(Stderr, |t| t.dimmed()),
     );
     eprintln!();
-    row("Device", device);
     row("Sources", &src);
-    row("Allow", &allow_line(allow));
-    row("Routes", &format!("{} customer destination(s)", routes));
-    row(
-        "Tracking",
-        &format!("{} transcript files", thousands(files)),
-    );
+    row("Allow", &allow_line(allow, routes));
     eprintln!();
     eprintln!(
         "  {} Watching in {}  {}",
@@ -234,11 +226,15 @@ mod tests {
     }
 
     #[test]
-    fn allow_line_joins_or_says_none() {
-        assert_eq!(super::allow_line(&[]), "none");
+    fn allow_line_joins_names_and_ready_count() {
+        assert_eq!(super::allow_line(&[], 0), "none");
         assert_eq!(
-            super::allow_line(&["podium-automation".into(), "chief".into()]),
-            "podium-automation, chief"
+            super::allow_line(&["podium-automation".into(), "chief".into()], 2),
+            "podium-automation, chief · 2 ready"
+        );
+        assert_eq!(
+            super::allow_line(&["podium-automation".into()], 1),
+            "podium-automation · 1 ready"
         );
     }
 

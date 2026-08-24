@@ -255,9 +255,7 @@ fn watch() -> Result<()> {
     let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
     let route_count = destination::discover_routes(workspaces.candidates(), &cfg.allow_repos).len();
     log::banner(
-        &cfg.device_id,
         &tools,
-        offsets.len(),
         route_count,
         &cfg.allow_repos,
         started.elapsed().as_millis(),
