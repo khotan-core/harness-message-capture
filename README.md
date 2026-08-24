@@ -88,7 +88,7 @@ Running in the foreground shows what it's doing:
 
   ✓ Watching in 3ms  · Ctrl-C to stop
 
-  15:53:05   harness-message-capture   captured 12   uploaded 12
+  15:53:05   harness-message-capture (cursor)   captured 12   uploaded 12
   15:58:05   idle (No new lines this pass · 3,952 files)
 ```
 
@@ -99,19 +99,20 @@ Default `run` prints only repositories on the allow list. Failures for those
 repos still print. Skip lines for other folders stay off unless you pass
 `--all-logs`.
 
-Each allowed workspace prints on its own line. Counts on that line belong to
-that folder only:
+Each allowed workspace prints on its own line. The name in parentheses is
+the transcript source. Counts on that line belong to that folder and source
+only:
 
 ```
-  16:30:09   harness-message-capture   captured 10   uploaded 10
-  16:30:09   khotan   captured 3   uploaded 3
+  16:30:09   harness-message-capture (cursor)   captured 10   uploaded 10
+  16:30:09   khotan (claude)   captured 3   uploaded 3
 ```
 
 If a customer endpoint is unreachable, nothing is lost. That customer's
 records stay in its local queue. Other customers keep draining:
 
 ```
-  15:52:47   podium-automation   captured 5   queued 531   (Host is up in DNS, port is closed)
+  15:52:47   podium-automation (cursor)   captured 5   queued 531   (Host is up in DNS, port is closed)
 ```
 
 Background mode writes the same log to

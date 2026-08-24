@@ -54,13 +54,19 @@ impl Offsets {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteWarning {
     pub label: String,
+    pub tool: String,
     pub means: String,
 }
 
 impl RouteWarning {
-    fn new(label: impl Into<String>, means: impl Into<String>) -> RouteWarning {
+    fn new(
+        label: impl Into<String>,
+        tool: impl Into<String>,
+        means: impl Into<String>,
+    ) -> RouteWarning {
         RouteWarning {
             label: label.into(),
+            tool: tool.into(),
             means: means.into(),
         }
     }
@@ -68,6 +74,7 @@ impl RouteWarning {
 
 #[derive(Debug)]
 pub struct CapturedFile {
+    pub tool: &'static str,
     pub route: Option<RouteRef>,
     pub records: Vec<Record>,
     pub offset_key: String,
@@ -139,6 +146,7 @@ fn read_file(
             None,
             Some(RouteWarning::new(
                 &provenance.project,
+                src.tool,
                 "Same encoded path matches two checkouts",
             )),
             false,
@@ -152,6 +160,7 @@ fn read_file(
                 None,
                 Some(RouteWarning::new(
                     name,
+                    src.tool,
                     "Repo is real, but not on the allow list",
                 )),
                 true,
@@ -163,6 +172,7 @@ fn read_file(
                 None,
                 Some(RouteWarning::new(
                     &provenance.project,
+                    src.tool,
                     "Repo found, dest file missing fields or conflicts",
                 )),
                 false,
@@ -172,6 +182,7 @@ fn read_file(
             None,
             Some(RouteWarning::new(
                 &provenance.project,
+                src.tool,
                 "Chat has no project folder",
             )),
             true,
@@ -203,6 +214,7 @@ fn read_file(
     }
 
     Ok(Some(CapturedFile {
+        tool: src.tool,
         route,
         records,
         offset_key: key,
@@ -489,6 +501,7 @@ mod tests {
             blocked[0].route_warning,
             Some(RouteWarning::new(
                 "customer",
+                "cursor",
                 "Repo found, dest file missing fields or conflicts"
             ))
         );
@@ -509,6 +522,7 @@ mod tests {
             skipped[0].route_warning,
             Some(RouteWarning::new(
                 "customer",
+                "cursor",
                 "Repo is real, but not on the allow list"
             ))
         );
@@ -545,6 +559,7 @@ mod tests {
             captured[0].route_warning,
             Some(RouteWarning::new(
                 "empty-window",
+                "cursor",
                 "Chat has no project folder"
             ))
         );

@@ -17,13 +17,14 @@ folders stay off. To print every skip line, run `khotan-observer run --all-logs`
 
 ## Activity lines
 
-Each workspace prints on its own line. Counts on that line belong to that
-folder only.
+Each workspace prints on its own line. The name in parentheses is the
+transcript source: `cursor`, `claude`, or `codex`. Counts on that line
+belong to that folder and source only.
 
-`usi   skipped 432   queued 200   (Repo is real, but not on the allow list)`
+`usi (cursor)   skipped 432   queued 200   (Repo is real, but not on the allow list)`
 
-`usi` is the folder name. Those 432 lines were not sent. The 200 queued lines
-are leftovers from when that folder was allowed.
+`usi` is the folder name. Those 432 Cursor lines were not sent. The 200
+queued lines are leftovers from when that folder was allowed.
 
 `dev-serve-robotics   queued 188   (Host is up in DNS, port is closed)`
 
@@ -57,20 +58,20 @@ Reinstall to pick up the new binary.
 
 ## Skip reasons (orange)
 
-`empty-window (Chat has no project folder)`
+`empty-window (cursor)   skipped 12   (Chat has no project folder)`
 
 The chat is not tied to a checkout. Cursor names that window `empty-window`.
 
-`podium-mirror (Repo is real, but not on the allow list)`
+`podium-mirror (cursor)   skipped 40   (Repo is real, but not on the allow list)`
 
 The folder exists. You did not select it in `configure`.
 
-`podium-automation (Repo found, dest file missing fields or conflicts)`
+`podium-automation (claude)   skipped 8   (Repo found, dest file missing fields or conflicts)`
 
 The dest file is missing fields, or `env.khotan.local` and `.env.khotan.local`
 disagree. The observer does not advance the offset. It retries.
 
-`empty-window (Same encoded path matches two checkouts)`
+`empty-window (cursor)   skipped 4   (Same encoded path matches two checkouts)`
 
 Two checkouts encode to the same chat folder name. The observer does not guess.
 It does not advance the offset.

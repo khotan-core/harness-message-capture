@@ -476,13 +476,49 @@ struct Pass {
     lines: Vec<log::Activity>,
 }
 
+fn activity_key(label: &str, tool: Option<&str>) -> (String, Option<String>) {
+    (label.to_string(), tool.map(|tool| tool.to_string()))
+}
+
 fn repo_entry<'a>(
-    repos: &'a mut BTreeMap<String, log::Activity>,
+    repos: &'a mut BTreeMap<(String, Option<String>), log::Activity>,
     label: &str,
+    tool: Option<&str>,
 ) -> &'a mut log::Activity {
     repos
-        .entry(label.to_string())
-        .or_insert_with(|| log::Activity::new(label))
+        .entry(activity_key(label, tool))
+        .or_insert_with(|| match tool {
+            Some(tool) => log::Activity::with_tool(label, tool),
+            None => log::Activity::new(label),
+        })
+}
+
+/// Put leftover queue counts and delivery failures on the sole activity
+/// line for this repo. Split them out when more than one source printed.
+fn attach_repo_status(
+    repos: &mut BTreeMap<(String, Option<String>), log::Activity>,
+    label: &str,
+    queued: usize,
+    means: Option<(log::Tone, String)>,
+) {
+    if queued == 0 && means.is_none() {
+        return;
+    }
+    let keys: Vec<_> = repos
+        .keys()
+        .filter(|(name, _)| name == label)
+        .cloned()
+        .collect();
+    let entry = match keys.as_slice() {
+        [key] => repos.get_mut(key).expect("key came from this map"),
+        _ => repo_entry(repos, label, None),
+    };
+    if queued > 0 {
+        entry.queued = queued;
+    }
+    if let Some((tone, means)) = means {
+        entry.set_means(tone, means);
+    }
 }
 
 /// Print one line per workspace that did something. Returns whether it printed.
@@ -518,24 +554,25 @@ fn scan_and_ship(
 
     let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
     let files = capture::collect_new(srcs, offsets, &workspaces, &cfg.allow_repos);
-    let mut repos: BTreeMap<String, log::Activity> = BTreeMap::new();
+    let mut repos: BTreeMap<(String, Option<String>), log::Activity> = BTreeMap::new();
     let mut offsets_changed = false;
     for file in files {
         match file.route {
             Some(route) => match spool.append(&route, &file.records) {
                 Ok(()) => {
-                    repo_entry(&mut repos, &route.label).captured += file.records.len();
+                    repo_entry(&mut repos, &route.label, Some(file.tool)).captured +=
+                        file.records.len();
                     offsets.set(file.offset_key, file.next_offset);
                     offsets_changed = true;
                 }
                 Err(_) => {
-                    repo_entry(&mut repos, &route.label)
+                    repo_entry(&mut repos, &route.label, Some(file.tool))
                         .set_means(log::Tone::Error, "Disk write to the spool failed");
                 }
             },
             None => {
                 if let Some(warn) = file.route_warning {
-                    let entry = repo_entry(&mut repos, &warn.label);
+                    let entry = repo_entry(&mut repos, &warn.label, Some(&warn.tool));
                     entry.skipped += file.records.len();
                     entry.set_means(log::Tone::Warning, warn.means);
                 }
@@ -553,19 +590,35 @@ fn scan_and_ship(
             observer.push(line);
         }
     }
-    for (label, uploaded) in drain(cfg, spool) {
-        let entry = repo_entry(&mut repos, &label);
-        if uploaded.count > 0 {
-            entry.uploaded += uploaded.count;
+    let drained = drain(cfg, spool);
+    for (label, uploaded) in &drained {
+        for (tool, count) in &uploaded.by_tool {
+            if *count > 0 {
+                repo_entry(&mut repos, label, Some(tool)).uploaded += count;
+            }
         }
-        if let Some((tone, means)) = uploaded.means {
-            entry.set_means(tone, means);
+    }
+    let mut status: BTreeMap<String, (usize, Option<(log::Tone, String)>)> = BTreeMap::new();
+    for (label, uploaded) in drained {
+        if let Some(means) = uploaded.means {
+            status.entry(label).or_insert((0, None)).1 = Some(means);
         }
     }
     for queued in spool.routes() {
-        if let Some(entry) = repos.get_mut(&queued.route.label) {
-            entry.queued = queued.pending;
+        if queued.pending == 0 {
+            continue;
         }
+        let has_line = repos.keys().any(|(name, _)| name == &queued.route.label)
+            || status.contains_key(&queued.route.label);
+        if has_line {
+            status
+                .entry(queued.route.label.clone())
+                .or_insert((0, None))
+                .0 = queued.pending;
+        }
+    }
+    for (label, (queued, means)) in status {
+        attach_repo_status(&mut repos, &label, queued, means);
     }
     let mut lines: Vec<log::Activity> = repos
         .into_values()
@@ -577,7 +630,7 @@ fn scan_and_ship(
 }
 
 struct DrainResult {
-    count: usize,
+    by_tool: BTreeMap<String, usize>,
     means: Option<(log::Tone, String)>,
 }
 
@@ -588,7 +641,7 @@ fn drain(cfg: &Config, spool: &Spool) -> BTreeMap<String, DrainResult> {
         if !destination::route_allowed(&queued.route, &cfg.allow_repos) {
             continue;
         }
-        let mut count = 0;
+        let mut by_tool: BTreeMap<String, usize> = BTreeMap::new();
         let mut means = None;
         loop {
             let batch = match spool.peek(&queued.route, cfg.batch) {
@@ -610,7 +663,9 @@ fn drain(cfg: &Config, spool: &Spool) -> BTreeMap<String, DrainResult> {
                         ));
                         break;
                     }
-                    count += batch.len();
+                    for record in &batch {
+                        *by_tool.entry(record.tool.clone()).or_default() += 1;
+                    }
                 }
                 uploader::Upload::Retry(reason) => {
                     means = Some((log::Tone::Warning, reason));
@@ -622,8 +677,8 @@ fn drain(cfg: &Config, spool: &Spool) -> BTreeMap<String, DrainResult> {
                 }
             }
         }
-        if count > 0 || means.is_some() {
-            by_label.insert(queued.route.label.clone(), DrainResult { count, means });
+        if !by_tool.is_empty() || means.is_some() {
+            by_label.insert(queued.route.label.clone(), DrainResult { by_tool, means });
         }
     }
     by_label
@@ -1017,5 +1072,54 @@ mod tests {
     fn clear_queue_requires_explicit_confirmation() {
         let err = clear_queue(&s(&[])).unwrap_err();
         assert!(err.to_string().contains("--yes"));
+    }
+
+    #[test]
+    fn attach_status_joins_a_single_source_line() {
+        let mut repos = BTreeMap::new();
+        repo_entry(&mut repos, "dev-serve-robotics", Some("cursor")).captured = 5;
+        attach_repo_status(
+            &mut repos,
+            "dev-serve-robotics",
+            3,
+            Some((
+                log::Tone::Warning,
+                "Host is up in DNS, port is closed".into(),
+            )),
+        );
+        assert_eq!(repos.len(), 1);
+        let line = repos.values().next().unwrap();
+        assert_eq!(line.tool.as_deref(), Some("cursor"));
+        assert_eq!(line.queued, 3);
+        assert_eq!(
+            line.means.as_deref(),
+            Some("Host is up in DNS, port is closed")
+        );
+    }
+
+    #[test]
+    fn attach_status_splits_when_two_sources_print() {
+        let mut repos = BTreeMap::new();
+        repo_entry(&mut repos, "dev-serve-robotics", Some("cursor")).captured = 5;
+        repo_entry(&mut repos, "dev-serve-robotics", Some("claude")).captured = 2;
+        attach_repo_status(
+            &mut repos,
+            "dev-serve-robotics",
+            10,
+            Some((
+                log::Tone::Warning,
+                "Host is up in DNS, port is closed".into(),
+            )),
+        );
+        assert_eq!(repos.len(), 3);
+        let shared = repos
+            .get(&activity_key("dev-serve-robotics", None))
+            .unwrap();
+        assert!(shared.tool.is_none());
+        assert_eq!(shared.queued, 10);
+        assert_eq!(
+            shared.means.as_deref(),
+            Some("Host is up in DNS, port is closed")
+        );
     }
 }

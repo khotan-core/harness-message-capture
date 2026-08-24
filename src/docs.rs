@@ -41,7 +41,7 @@ mod tests {
         assert!(HELP.contains("ALERT  Newer observer"));
         assert!(HELP.contains("khotan-observer docs"));
         assert!(HELP.contains("khotan-observer update"));
-        assert!(HELP.contains("usi   skipped"));
+        assert!(HELP.contains("usi (cursor)   skipped"));
         assert!(HELP.contains("--all-logs"));
     }
 }

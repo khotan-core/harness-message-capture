@@ -256,6 +256,9 @@ pub fn banner(sources: &[&str], routes: usize, allow: &[String], ready_ms: u128)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Activity {
     pub label: String,
+    /// Transcript source: `cursor`, `claude`, or `codex`. `None` on queue
+    /// health, observer errors, and leftover delivery failures.
+    pub tool: Option<String>,
     pub captured: usize,
     pub uploaded: usize,
     pub skipped: usize,
@@ -268,12 +271,26 @@ impl Activity {
     pub fn new(label: impl Into<String>) -> Activity {
         Activity {
             label: label.into(),
+            tool: None,
             captured: 0,
             uploaded: 0,
             skipped: 0,
             queued: 0,
             tone: Tone::Delivery,
             means: None,
+        }
+    }
+
+    pub fn with_tool(label: impl Into<String>, tool: impl Into<String>) -> Activity {
+        let mut line = Activity::new(label);
+        line.tool = Some(tool.into());
+        line
+    }
+
+    fn display_label(&self) -> String {
+        match &self.tool {
+            Some(tool) => format!("{} ({tool})", self.label),
+            None => self.label.clone(),
         }
     }
 
@@ -297,7 +314,7 @@ impl Activity {
     }
 
     fn render(&self) -> String {
-        let mut parts = vec![paint(self.tone, &self.label)];
+        let mut parts = vec![paint(self.tone, &self.display_label())];
         if self.captured > 0 {
             parts.push(format!(
                 "{} {}",
@@ -384,12 +401,17 @@ fn allow_matches_label(entry: &str, label: &str) -> bool {
 pub fn fold_skips(lines: Vec<Activity>, max_skips: usize) -> Vec<Activity> {
     let (mut keep, mut skip_only): (Vec<_>, Vec<_>) =
         lines.into_iter().partition(|line| !line.is_skip_only());
-    keep.sort_by(|left, right| left.label.cmp(&right.label));
+    keep.sort_by(|left, right| {
+        left.label
+            .cmp(&right.label)
+            .then_with(|| left.tool.cmp(&right.tool))
+    });
     skip_only.sort_by(|left, right| {
         right
             .skipped
             .cmp(&left.skipped)
             .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.tool.cmp(&right.tool))
     });
     if skip_only.len() > max_skips {
         let rest = skip_only.split_off(max_skips);
@@ -562,6 +584,29 @@ mod tests {
     }
 
     #[test]
+    fn render_names_the_transcript_source() {
+        let mut line = super::Activity::with_tool("dev-serve-robotics", "cursor");
+        line.captured = 13;
+        line.uploaded = 13;
+        assert_eq!(
+            line.render(),
+            "dev-serve-robotics (cursor)   captured 13   uploaded 13"
+        );
+    }
+
+    #[test]
+    fn render_names_the_source_on_a_skip() {
+        let mut line = super::Activity::with_tool("usi", "cursor");
+        line.skipped = 432;
+        line.tone = super::Tone::Warning;
+        line.means = Some("Repo is real, but not on the allow list".into());
+        assert_eq!(
+            line.render(),
+            "usi (cursor)   skipped 432   (Repo is real, but not on the allow list)"
+        );
+    }
+
+    #[test]
     fn render_keeps_a_delivery_failure_on_its_own_line() {
         let mut line = super::Activity::new("dev-serve-robotics");
         line.queued = 188;
@@ -598,6 +643,15 @@ mod tests {
         );
         let noisy = super::for_display(lines, &["dev-serve-robotics".into()], true);
         assert_eq!(noisy.len(), 5);
+    }
+
+    #[test]
+    fn for_display_matches_label_when_tool_is_set() {
+        let mut allowed = super::Activity::with_tool("dev-serve-robotics", "cursor");
+        allowed.captured = 1;
+        let quiet = super::for_display(vec![allowed], &["dev-serve-robotics".into()], false);
+        assert_eq!(quiet.len(), 1);
+        assert_eq!(quiet[0].tool.as_deref(), Some("cursor"));
     }
 
     #[test]
