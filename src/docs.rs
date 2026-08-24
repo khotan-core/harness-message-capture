@@ -21,8 +21,7 @@ pub fn print() {
 pub fn write() -> Result<PathBuf> {
     let path = docs_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     fs::write(&path, HELP).with_context(|| format!("write {}", path.display()))?;
     Ok(path)
@@ -38,6 +37,7 @@ mod tests {
         assert!(HELP.contains("dest file missing fields or conflicts"));
         assert!(HELP.contains("Same encoded path matches two checkouts"));
         assert!(HELP.contains("Send worked, local delete failed"));
+        assert!(HELP.contains("Newer observer"));
         assert!(HELP.contains("khotan-observer docs"));
     }
 }

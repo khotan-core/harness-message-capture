@@ -20,6 +20,9 @@ toml = "0.8"
 anyhow = "1"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 fs2 = "0.4.3"
+# Already in the tree through fs2. Used only for terminal raw mode, which keeps
+# the `configure` picker off a TUI crate.
+libc = "0.2"
 
 # Optimize hard for a small, low-memory always-on daemon.
 [profile.release]

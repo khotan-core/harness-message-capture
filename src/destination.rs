@@ -93,6 +93,86 @@ pub fn route_allowed(route: &RouteRef, allow: &[String]) -> bool {
         .any(|entry| name_matches(&route.label, entry.trim()))
 }
 
+/// Whether a repository could upload today, for the `configure` list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Readiness {
+    /// No destination file inside the repository boundary.
+    NoFile,
+    Ready,
+    /// A destination file exists but cannot produce a route. Carries a short
+    /// phrase for the list, such as `missing KHOTAN_ORG_ID`.
+    Blocked(String),
+}
+
+/// `resolve` stays the only authority on whether a repository is usable. This
+/// adds a reason on the failure path so a typo does not hide a repository from
+/// the list without an explanation.
+pub fn readiness(workspace: &Path) -> Readiness {
+    match resolve(workspace) {
+        Ok(Some(_)) => Readiness::Ready,
+        Ok(None) => Readiness::NoFile,
+        Err(_) => Readiness::Blocked(diagnose(workspace)),
+    }
+}
+
+fn diagnose(workspace: &Path) -> String {
+    let Some((path, both)) = nearest_env_file(workspace) else {
+        return "destination file is unreadable".to_string();
+    };
+    if both {
+        return "env.khotan.local and .env.khotan.local disagree".to_string();
+    }
+    let Ok(body) = fs::read_to_string(&path) else {
+        return "destination file is unreadable".to_string();
+    };
+    let parsed = parse_env(&body);
+    let missing: Vec<&str> = ["KHOTAN_API_URL", "KHOTAN_API_KEY", "KHOTAN_ORG_ID"]
+        .into_iter()
+        .filter(|key| {
+            parsed
+                .get(*key)
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+        })
+        .collect();
+    if !missing.is_empty() {
+        return format!("missing {}", missing.join(", "));
+    }
+    let url = parsed
+        .get("KHOTAN_API_URL")
+        .map(String::as_str)
+        .unwrap_or("");
+    match normalize_api_url(url) {
+        Err(_) => "KHOTAN_API_URL must be a bare origin".to_string(),
+        Ok(_) => "destination file is not usable".to_string(),
+    }
+}
+
+/// Nearest destination file inside the repository boundary, tolerating the
+/// conflict that `select_env_file` rejects. The flag reports that conflict.
+fn nearest_env_file(start: &Path) -> Option<(PathBuf, bool)> {
+    let mut dir = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start.parent()?.to_path_buf()
+    };
+    loop {
+        let canonical = dir.join(ENV_FILE);
+        let dotted = dir.join(DOTTED_ENV_FILE);
+        let both = canonical.is_file() && dotted.is_file();
+        if canonical.is_file() {
+            return Some((canonical, both));
+        }
+        if dotted.is_file() {
+            return Some((dotted, both));
+        }
+        if dir.join(".git").exists() {
+            return None;
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+}
+
 /// Find the authoritative repo-local route for a resolved harness workspace.
 /// No ambient process environment or machine-global Khotan profile is used.
 pub fn resolve(workspace: &Path) -> Result<Option<RouteRef>> {

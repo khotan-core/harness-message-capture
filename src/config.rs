@@ -79,7 +79,7 @@ impl Config {
         out.push_str("# khotan-observer machine config\n");
         out.push_str("# The next scan reads this file. Restart is not required.\n");
         out.push_str("# poll_secs, batch, and search_roots are presets.\n");
-        out.push_str("# Edit only allow_repos, or run: khotan-observer configure --allow-repo <folder>\n\n");
+        out.push_str("# Edit only allow_repos, or run: khotan-observer configure\n\n");
         out.push_str(&format!("device_id = {}\n", toml_quote(&self.device_id)));
         out.push_str(&format!("poll_secs = {}\n", self.poll_secs));
         out.push_str(&format!("batch = {}\n\n", self.batch));

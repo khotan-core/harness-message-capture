@@ -167,7 +167,11 @@ fn mark_row(row: usize) -> String {
         let (fr, fg, fb) = if upper[col] == b'#' { INDIGO } else { CORAL };
         let (br, bg, bb) = if lower[col] == b'#' { INDIGO } else { CORAL };
         let style = Style::new().truecolor(fr, fg, fb).on_truecolor(br, bg, bb);
-        out.push_str(&"▀".if_supports_color(Stderr, |t| t.style(style)).to_string());
+        out.push_str(
+            &"▀"
+                .if_supports_color(Stderr, |t| t.style(style))
+                .to_string(),
+        );
     }
     out
 }
@@ -378,7 +382,10 @@ mod tests {
     fn mark_row_emits_one_cell_per_column() {
         for row in 0..super::MARK.len() / 2 {
             let rendered = super::mark_row(row);
-            assert_eq!(rendered.chars().filter(|c| *c == '▀').count(), super::MARK_COLS);
+            assert_eq!(
+                rendered.chars().filter(|c| *c == '▀').count(),
+                super::MARK_COLS
+            );
         }
     }
 

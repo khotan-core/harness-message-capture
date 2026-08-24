@@ -34,6 +34,7 @@ A push to `main` does not publish a binary. Only a `v*` tag does. Never leave `C
 | --- | --- |
 | `src/main.rs` | CLI: `configure`, `run`, `start`, `stop`, `logs`, `uninstall`, `status`, `docs`, `run-once`, `receive`, `read`, `clear-queue` |
 | `src/docs.rs` | Embedded log glossary from `dist/help.md`; `docs` and `docs --write` |
+| `src/picker.rs` | Raw-mode checkbox list behind a bare `configure` |
 | `src/sources.rs` | Discover transcript roots that exist on disk |
 | `src/workspace.rs` | Map a transcript path to a git checkout or worktree |
 | `src/destination.rs` | Load `env.khotan.local` / `.env.khotan.local` and verify org |
@@ -48,6 +49,7 @@ A push to `main` does not publish a binary. Only a `v*` tag does. Never leave `C
 | `src/receiver.rs` | Local proof sink |
 | `src/store.rs` / `src/reader.rs` | Inbox layout and local inspect |
 | `src/log.rs` | Foreground and LaunchAgent log format |
+| `src/update.rs` | Compare this binary to the latest GitHub Release and warn on `run` |
 
 Capture path: watch or poll `*.jsonl` → redact → require a complete repo-local destination → respect `allow_repos` → spool → upload. Workspaces without a valid destination are skipped and their offsets advance.
 
@@ -91,7 +93,8 @@ The release profile in `Cargo.toml` optimizes for a small always-on binary (`opt
 Installed-binary workflow (user machine):
 
 ```bash
-khotan-observer configure --allow-repo customer-repo
+khotan-observer configure                        # checkbox list; no TTY prints a hint and exits
+khotan-observer configure --allow-repo customer-repo   # scriptable, replaces the list
 khotan-observer run
 khotan-observer start
 khotan-observer logs

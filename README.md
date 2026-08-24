@@ -31,6 +31,11 @@ repositories may upload. A log glossary ships in the binary. Run
 `khotan-observer docs`, or open `~/.local/share/khotan-observer/help.md`.
 
 ```bash
+# Checkbox list of every repository that has a destination file.
+# Arrows move, space toggles, type to filter, enter saves, esc cancels.
+khotan-observer configure
+
+# Same choice without a prompt, for scripts and machines with no terminal.
 khotan-observer configure --allow-repo podium-automation --allow-repo chief-nutrition
 
 # Foreground — live log. Ctrl-C stops the observer and returns to the shell.
@@ -73,6 +78,9 @@ Running in the foreground shows what it's doing:
   15:53:05   captured 12   uploaded 12   harness-message-capture
   15:58:05   idle (No new lines this pass · 3,952 files)
 ```
+
+If GitHub has a newer tagged release, `run` prints an orange warn after
+the banner. Capture still starts.
 
 When several workspaces contribute in one pass, counts read as an add:
 
@@ -119,9 +127,12 @@ they are never copied into message records, queue metadata, or logs. Repositorie
 without a valid destination are skipped and their offsets advance, so adding a
 destination later does not retroactively upload old chats.
 
-To choose which repositories upload, run `configure --allow-repo` or edit
-`allow_repos` in `~/.config/harness-message-capture/config.toml`. Each entry
-must be the exact folder name. `podium-automation` does not match
+To choose which repositories upload, run `configure` and tick them in the list,
+or edit `allow_repos` in `~/.config/harness-message-capture/config.toml`. The
+list shows only repositories that already have a destination file, because no
+other repository can upload. A repository you allowed earlier stays on the list
+even after its destination file goes away, so saving never drops an entry
+silently. Each entry must be the exact folder name. `podium-automation` does not match
 `podium-automation-mirror`. An empty list sends nothing. The next scan reads
 the file; you do not need to restart.
 

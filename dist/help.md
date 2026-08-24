@@ -22,6 +22,17 @@ Deliveries print in green. Warnings print in orange. Errors print in red.
 
 `harness-message-capture +10` means this pass added 10 lines from that folder.
 
+## Startup warns (orange)
+
+`No Cursor, Claude, or Codex folders`
+
+None of the transcript roots exist on this machine.
+
+`Newer observer v0.1.17 is out (this binary is 0.1.16)`
+
+GitHub Releases has a newer tagged build than this binary. Capture still
+runs. Reinstall to pick up the new binary.
+
 ## Skip reasons (orange)
 
 `empty-window (Chat has no project folder)`
@@ -30,7 +41,7 @@ The chat is not tied to a checkout. Cursor names that window `empty-window`.
 
 `podium-mirror (Repo is real, but not on the allow list)`
 
-The folder exists. You did not add it with `configure --allow-repo`.
+The folder exists. You did not select it in `configure`.
 
 `podium-automation (Repo found, dest file missing fields or conflicts)`
 
@@ -71,7 +82,7 @@ It does not advance the offset.
 ## Commands
 
 ```
-khotan-observer configure --allow-repo <folder>
+khotan-observer configure
 khotan-observer start
 khotan-observer docs
 khotan-observer status

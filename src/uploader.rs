@@ -34,11 +34,7 @@ pub fn send(device_id: &str, route: &RouteRef, records: &[Record]) -> Upload {
     }
     let credentials = match destination::read_credentials(route) {
         Ok(credentials) => credentials,
-        Err(_) => {
-            return Upload::Blocked(
-                "Dest file gone or URL/org changed after queue".into(),
-            )
-        }
+        Err(_) => return Upload::Blocked("Dest file gone or URL/org changed after queue".into()),
     };
     match verify_org(route, &credentials.api_key) {
         Upload::Ok => {}
@@ -97,9 +93,7 @@ fn verify_org(route: &RouteRef, api_key: &str) -> Upload {
         .and_then(|body| serde_json::from_str(&body).map_err(|error| error.to_string()))
     {
         Ok(principal) => principal,
-        Err(_) => {
-            return Upload::Blocked("The /api/v1/me body was not usable".into())
-        }
+        Err(_) => return Upload::Blocked("The /api/v1/me body was not usable".into()),
     };
     if principal.organization_id.as_deref() != Some(route.org_id.as_str()) {
         return Upload::Blocked("Key's org does not match KHOTAN_ORG_ID".into());

@@ -169,6 +169,7 @@ version = "0.1.16"
 dependencies = [
  "anyhow",
  "fs2",
+ "libc",
  "notify",
  "owo-colors",
  "regex",

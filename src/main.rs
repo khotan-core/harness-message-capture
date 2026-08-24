@@ -4,6 +4,7 @@ mod config;
 mod destination;
 mod docs;
 mod log;
+mod picker;
 mod reader;
 mod receiver;
 mod record;
@@ -12,6 +13,7 @@ mod singleton;
 mod sources;
 mod spool;
 mod store;
+mod update;
 mod uploader;
 mod workspace;
 
@@ -20,7 +22,7 @@ use capture::Offsets;
 use config::Config;
 use notify::{RecursiveMode, Watcher};
 use spool::Spool;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -59,7 +61,8 @@ fn print_help() {
         "khotan-observer — capture local AI coding-agent transcripts\n\
          \n\
          USAGE:\n\
-           khotan-observer configure [--allow-repo <folder>] [...]\n\
+           khotan-observer configure    Pick the repositories to observe from a checkbox list\n\
+           khotan-observer configure --allow-repo <folder> [...]   Same choice, without a prompt\n\
            khotan-observer run          Capture in the foreground (Ctrl-C stops and returns to the shell)\n\
            khotan-observer start        Install & start the background LaunchAgent\n\
            khotan-observer stop         Stop the background LaunchAgent\n\
@@ -91,9 +94,7 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
                 if value.starts_with('-') || value.is_empty() {
                     anyhow::bail!("--allow-repo requires a folder name");
                 }
-                allow_repos
-                    .get_or_insert_with(Vec::new)
-                    .push(value.clone());
+                allow_repos.get_or_insert_with(Vec::new).push(value.clone());
                 i += 2;
             }
             "--poll" | "--batch" | "--search-root" => {
@@ -110,8 +111,13 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
 fn configure(args: &[String]) -> Result<()> {
     let parsed = parse_configure_args(args)?;
     let mut cfg = Config::load().unwrap_or(Config::fresh(config::random_id()?));
-    if let Some(allow_repos) = parsed.allow_repos {
-        cfg.allow_repos = allow_repos;
+    match parsed.allow_repos {
+        Some(allow_repos) => cfg.allow_repos = allow_repos,
+        None => {
+            if let Some(chosen) = choose_allow_repos(&cfg)? {
+                cfg.allow_repos = chosen;
+            }
+        }
     }
     cfg.endpoint = None;
     cfg.token = None;
@@ -123,7 +129,7 @@ fn configure(args: &[String]) -> Result<()> {
         Err(error) => eprintln!("could not write docs: {error}"),
     }
     if cfg.allow_repos.is_empty() {
-        println!("allow_repos: none — add one with: khotan-observer configure --allow-repo <folder>");
+        println!("allow_repos: none — nothing is observed until you select a repository");
     } else {
         println!("allow_repos:");
         for name in &cfg.allow_repos {
@@ -131,6 +137,140 @@ fn configure(args: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Open the checkbox picker for a bare `configure`. `Ok(None)` leaves the saved
+/// allowlist alone: either the person cancelled, or nothing here can answer.
+fn choose_allow_repos(cfg: &Config) -> Result<Option<Vec<String>>> {
+    if !picker::is_interactive() {
+        eprintln!("no terminal here, so the picker did not open");
+        eprintln!("select repositories with: khotan-observer configure --allow-repo <folder>");
+        return Ok(None);
+    }
+    let repos = repos_with_destination(cfg);
+    let rows = build_choices(&repos, &cfg.allow_repos);
+    if rows.is_empty() {
+        eprintln!("no repository under the search roots has a Khotan destination file");
+        eprintln!("add env.khotan.local to a repository, then run configure again");
+        return Ok(None);
+    }
+    picker::run(rows)
+}
+
+/// A repository that carries a destination file, whether or not that file
+/// works. A broken one still earns a row, because a silent omission is what
+/// makes a typo hard to find.
+struct Found {
+    path: PathBuf,
+    blocked: Option<String>,
+}
+
+/// Every repository with a destination file, nearest first by name. A worktree
+/// collapses into its primary checkout, which is what both the selection and
+/// the destination already key on.
+fn repos_with_destination(cfg: &Config) -> Vec<Found> {
+    let index = workspace::WorkspaceIndex::discover(&cfg.search_roots);
+    let mut repos: Vec<Found> = Vec::new();
+    for candidate in index.candidates() {
+        let path = match workspace::primary_repo_for_worktree(candidate) {
+            Ok(Some(primary)) => primary,
+            _ => candidate.clone(),
+        };
+        if repos.iter().any(|found| found.path == path) {
+            continue;
+        }
+        match destination::readiness(&path) {
+            destination::Readiness::NoFile => {}
+            destination::Readiness::Ready => repos.push(Found {
+                path,
+                blocked: None,
+            }),
+            destination::Readiness::Blocked(reason) => repos.push(Found {
+                path,
+                blocked: Some(reason),
+            }),
+        }
+    }
+    repos.sort_by_key(|found| leaf(&found.path).to_ascii_lowercase());
+    repos
+}
+
+/// Rows for the picker. Discovered repositories first, then any repository
+/// already selected that matches none of them, still checked, so saving the
+/// list never drops an entry the person cannot see.
+fn build_choices(repos: &[Found], allow: &[String]) -> Vec<picker::Choice> {
+    let paths: Vec<PathBuf> = repos.iter().map(|found| found.path.clone()).collect();
+    let mut rows: Vec<picker::Choice> = repos
+        .iter()
+        .map(|found| {
+            let selected = destination::workspace_allowed(&found.path, allow);
+            picker::Choice {
+                entry: allow_entry(&found.path, &paths, allow),
+                label: leaf(&found.path),
+                detail: match &found.blocked {
+                    Some(reason) => reason.clone(),
+                    None => pretty_path(&found.path),
+                },
+                selected,
+                // A repository already selected stays tickable so it can be
+                // removed. A broken one nobody chose cannot be turned on.
+                disabled: found.blocked.is_some() && !selected,
+            }
+        })
+        .collect();
+    for entry in allow {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let claims_a_repo = repos
+            .iter()
+            .any(|found| destination::workspace_allowed(&found.path, &[entry.to_string()]));
+        if claims_a_repo {
+            continue;
+        }
+        rows.push(picker::Choice {
+            entry: entry.to_string(),
+            label: leaf(Path::new(entry)),
+            detail: "selected, but no destination found".to_string(),
+            selected: true,
+            disabled: false,
+        });
+    }
+    rows
+}
+
+/// The string to write for a repository. Two checkouts can share a folder name
+/// and a bare name would allow both, so those rows keep the full path. An
+/// absolute entry already in the config stays exactly as the person wrote it.
+fn allow_entry(repo: &Path, repos: &[PathBuf], allow: &[String]) -> String {
+    let existing = allow
+        .iter()
+        .map(|entry| entry.trim())
+        .find(|entry| Path::new(entry).is_absolute() && Path::new(entry) == repo);
+    if let Some(entry) = existing {
+        return entry.to_string();
+    }
+    let name = leaf(repo);
+    if repos.iter().filter(|other| leaf(other) == name).count() > 1 {
+        repo.display().to_string()
+    } else {
+        name
+    }
+}
+
+fn leaf(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// `~/Developer/customer` fits a list column better than the absolute path.
+fn pretty_path(path: &Path) -> String {
+    match path.strip_prefix(config::home()) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
 }
 
 fn status() -> Result<()> {
@@ -159,7 +299,7 @@ fn status() -> Result<()> {
     println!("config    : {}", config::config_path().display());
     println!("docs      : {}", docs::docs_path().display());
     if cfg.allow_repos.is_empty() {
-        println!("allow     : none — khotan-observer configure --allow-repo <folder>");
+        println!("allow     : none — run khotan-observer configure to select repositories");
     } else {
         println!("allow     :");
         for name in &cfg.allow_repos {
@@ -256,6 +396,7 @@ fn watch() -> Result<()> {
     if srcs.is_empty() {
         log::warn("No Cursor, Claude, or Codex folders");
     }
+    update::warn_if_stale();
 
     // Catch up on anything appended while we were stopped.
     report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool), &spool);
@@ -666,6 +807,103 @@ mod tests {
     fn parse_configure_rejects_unknown_flag() {
         let err = parse_configure_args(&s(&["--nope"])).unwrap_err();
         assert!(err.to_string().contains("unknown flag"));
+    }
+
+    fn repos(paths: &[&str]) -> Vec<Found> {
+        paths
+            .iter()
+            .map(|path| Found {
+                path: PathBuf::from(path),
+                blocked: None,
+            })
+            .collect()
+    }
+
+    fn blocked(path: &str, reason: &str) -> Found {
+        Found {
+            path: PathBuf::from(path),
+            blocked: Some(reason.to_string()),
+        }
+    }
+
+    #[test]
+    fn discovered_repos_start_checked_when_they_are_already_allowed() {
+        let found = repos(&["/Users/a/Developer/podium", "/Users/a/Developer/chief"]);
+        let rows = build_choices(&found, &["podium".into()]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "podium");
+        assert!(rows[0].selected);
+        assert!(!rows[1].selected);
+        assert_eq!(picker::selected_entries(&rows), vec!["podium"]);
+    }
+
+    #[test]
+    fn saving_never_drops_an_allowed_repo_the_scan_missed() {
+        let found = repos(&["/Users/a/Developer/podium"]);
+        let rows = build_choices(&found, &["podium".into(), "retired-repo".into()]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].label, "retired-repo");
+        assert!(rows[1].selected);
+        assert_eq!(rows[1].detail, "selected, but no destination found");
+        assert_eq!(
+            picker::selected_entries(&rows),
+            vec!["podium", "retired-repo"]
+        );
+    }
+
+    #[test]
+    fn a_shared_folder_name_is_written_as_a_full_path() {
+        let found = repos(&["/Users/a/Developer/api", "/Users/a/code/api"]);
+        let rows = build_choices(&found, &[]);
+        assert_eq!(rows[0].entry, "/Users/a/Developer/api");
+        assert_eq!(rows[1].entry, "/Users/a/code/api");
+    }
+
+    #[test]
+    fn a_unique_folder_name_is_written_as_a_bare_name() {
+        let found = repos(&["/Users/a/Developer/podium"]);
+        assert_eq!(build_choices(&found, &[])[0].entry, "podium");
+    }
+
+    #[test]
+    fn an_existing_absolute_entry_keeps_its_exact_text() {
+        let found = repos(&["/Users/a/Developer/podium"]);
+        let rows = build_choices(&found, &["/Users/a/Developer/podium".into()]);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].selected);
+        assert_eq!(rows[0].entry, "/Users/a/Developer/podium");
+    }
+
+    #[test]
+    fn a_broken_destination_file_shows_its_reason_instead_of_vanishing() {
+        let mut found = repos(&["/Users/a/Developer/podium"]);
+        found.push(blocked("/Users/a/Developer/typo", "missing KHOTAN_ORG_ID"));
+        let rows = build_choices(&found, &[]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].label, "typo");
+        assert_eq!(rows[1].detail, "missing KHOTAN_ORG_ID");
+        assert!(rows[1].disabled);
+        assert!(!rows[1].selected);
+    }
+
+    #[test]
+    fn a_selected_repo_stays_tickable_after_its_destination_breaks() {
+        let found = vec![blocked(
+            "/Users/a/Developer/podium",
+            "missing KHOTAN_API_KEY",
+        )];
+        let rows = build_choices(&found, &["podium".into()]);
+        assert!(rows[0].selected);
+        assert!(!rows[0].disabled);
+        assert_eq!(rows[0].detail, "missing KHOTAN_API_KEY");
+        assert_eq!(picker::selected_entries(&rows), vec!["podium"]);
+    }
+
+    #[test]
+    fn blank_allowlist_entries_do_not_become_rows() {
+        let rows = build_choices(&repos(&["/Users/a/Developer/podium"]), &["".into()]);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].selected);
     }
 
     #[test]

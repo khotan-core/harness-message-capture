@@ -118,7 +118,7 @@ if [[ "$WAS_RUNNING" -eq 1 ]]; then
   echo "==> Restarting background observer"
   "$BIN_PATH" start
   echo ""
-  echo "Upgrade complete. Set repos with: khotan-observer configure --allow-repo <folder>"
+  echo "Upgrade complete. Select repos with: khotan-observer configure"
   echo "Follow it with: khotan-observer logs"
   echo ""
   exit 0
@@ -126,6 +126,6 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "  1. khotan-observer configure --allow-repo <folder>"
+echo "  1. khotan-observer configure"
 echo "  2. khotan-observer start"
 echo ""
