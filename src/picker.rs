@@ -185,6 +185,8 @@ impl State {
         }
 
         let checked = self.rows.iter().filter(|row| row.selected).count();
+        let found = self.rows.len();
+        let files = if found == 1 { "file" } else { "files" };
         frame.push_str(&line(&format!(
             "  {}  {}",
             "Repositories to observe".if_supports_color(Stderr, |t| t.bold()),
@@ -192,13 +194,7 @@ impl State {
         )));
         frame.push_str(&line(&format!(
             "  {}",
-            "Select only the repos you want to track."
-                .if_supports_color(Stderr, |t| t.bold())
-        )));
-        frame.push_str(&line(&format!(
-            "  {}",
-            "NOTHING unselected is tracked. MESSAGES will NOT be sent for those repos."
-                .if_supports_color(Stderr, |t| t.yellow())
+            dim(&format!("Detected {found} env.khotan.local {files}"))
         )));
         frame.push_str(&line(&format!(
             "  {}",

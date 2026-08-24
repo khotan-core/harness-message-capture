@@ -179,9 +179,6 @@ fn choose_allow_repos(cfg: &Config) -> Result<Option<Vec<String>>> {
         eprintln!("add env.khotan.local to a repository, then run configure again");
         return Ok(None);
     }
-    eprintln!("Select the repositories you want to track.");
-    eprintln!("NOTHING that is not selected here will be tracked.");
-    eprintln!("MESSAGES will NOT be sent for those repositories!");
     picker::run(rows)
 }
 

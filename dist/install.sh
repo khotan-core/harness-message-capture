@@ -114,9 +114,8 @@ CONFIG="${HOME}/.config/harness-message-capture/config.toml"
 
 print_configure_why() {
   local prefix="${1:-}"
-  echo "${prefix}Select the repositories you want to track."
-  echo "${prefix}NOTHING that is not selected here will be tracked."
-  echo "${prefix}MESSAGES will NOT be sent for those repositories!"
+  echo "${prefix}Everything that is selected here will be tracked."
+  echo "${prefix}MESSAGES will be sent for those repositories."
 }
 
 print_next_steps() {
