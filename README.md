@@ -117,15 +117,16 @@ without a valid destination are skipped and their offsets advance, so adding a
 destination later does not retroactively upload old chats.
 
 Edit `allow_repos` in `~/.config/harness-message-capture/config.toml` to choose
-which repositories upload. The installer writes this file. A short name matches
-any folder that starts with it, so `podium` matches `podium-automation`. An empty
-list sends nothing. The next scan reads the file; you do not need to restart.
+which repositories upload. The installer writes this file. Each entry must be
+the exact folder name. `podium-automation` does not match
+`podium-automation-mirror`. An empty list sends nothing. The next scan reads
+the file; you do not need to restart.
 
 ```toml
 allow_repos = [
-  "podium",
-  "chief",
-  "dev-serve",
+  "podium-automation",
+  "chief-nutrition",
+  "dev-serve-robotics",
 ]
 ```
 

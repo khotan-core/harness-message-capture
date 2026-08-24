@@ -24,8 +24,8 @@ pub struct Config {
     /// Roots searched for customer repositories and worktrees.
     #[serde(default = "default_search_roots")]
     pub search_roots: Vec<PathBuf>,
-    /// Repositories that may upload chats. Short names match any folder that
-    /// starts with the name. An empty list sends nothing.
+    /// Directory names or absolute paths that may upload chats. Names match
+    /// the folder leaf exactly. An empty list sends nothing.
     #[serde(default)]
     pub allow_repos: Vec<String>,
 }
@@ -87,8 +87,7 @@ impl Config {
         }
         out.push_str("]\n\n");
         out.push_str("# Repositories that may upload chats from this machine.\n");
-        out.push_str("# A short name matches any folder that starts with it.\n");
-        out.push_str("# \"podium\" matches podium-automation.\n");
+        out.push_str("# Use the exact folder name, such as podium-automation.\n");
         out.push_str("# An empty list sends nothing.\n");
         out.push_str("allow_repos = [\n");
         for name in &self.allow_repos {

@@ -54,7 +54,7 @@ On-disk state:
 | LaunchAgent | `~/Library/LaunchAgents/com.khotan.observer.plist` |
 | Background log | `~/Library/Logs/khotan-observer.log` |
 
-`allow_repos` empty means send nothing. A short name matches the folder leaf or any leaf that starts with it (`podium` matches `podium-automation`). Absolute paths match the workspace or a parent. `configure --allow-all` clears the list.
+`allow_repos` empty means send nothing. A name matches the folder leaf exactly (`podium-automation` does not match `podium-automation-mirror`). An absolute path matches only that workspace.
 
 ## Setup commands
 
