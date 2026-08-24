@@ -251,6 +251,7 @@ fn watch() -> Result<()> {
         &tools,
         offsets.len(),
         route_count,
+        &cfg.allow_repos,
         started.elapsed().as_millis(),
     );
     if srcs.is_empty() {

@@ -63,9 +63,10 @@ Running in the foreground shows what it's doing:
 ```
   khotan-observer  0.1.9
 
-    Endpoint   https://ingest.example.com/ingest
     Device     3f88991f7ee379a1589ab29795e43b0c
     Sources    claude, codex, cursor
+    Allow      podium-automation, chief-nutrition
+    Routes     2 customer destination(s)
     Tracking   3,952 transcript files
 
   ✓ Watching in 3ms  · Ctrl-C to stop

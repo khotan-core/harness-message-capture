@@ -84,8 +84,23 @@ fn stop_hint_for(mode: Option<&std::ffi::OsStr>) -> &'static str {
     }
 }
 
+fn allow_line(allow: &[String]) -> String {
+    if allow.is_empty() {
+        "none".to_string()
+    } else {
+        allow.join(", ")
+    }
+}
+
 /// Startup summary printed once when the watcher comes up.
-pub fn banner(device: &str, sources: &[&str], files: usize, routes: usize, ready_ms: u128) {
+pub fn banner(
+    device: &str,
+    sources: &[&str],
+    files: usize,
+    routes: usize,
+    allow: &[String],
+    ready_ms: u128,
+) {
     let version = env!("CARGO_PKG_VERSION");
     let src = if sources.is_empty() {
         "none found".to_string()
@@ -101,6 +116,7 @@ pub fn banner(device: &str, sources: &[&str], files: usize, routes: usize, ready
     eprintln!();
     row("Device", device);
     row("Sources", &src);
+    row("Allow", &allow_line(allow));
     row("Routes", &format!("{} customer destination(s)", routes));
     row(
         "Tracking",
@@ -215,6 +231,15 @@ mod tests {
         assert_eq!(thousands(950), "950");
         assert_eq!(thousands(3_950), "3,950");
         assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn allow_line_joins_or_says_none() {
+        assert_eq!(super::allow_line(&[]), "none");
+        assert_eq!(
+            super::allow_line(&["podium-automation".into(), "chief".into()]),
+            "podium-automation, chief"
+        );
     }
 
     #[test]
