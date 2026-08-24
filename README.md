@@ -68,7 +68,7 @@ It does not delete the original AI-tool transcripts or reset their offsets.
 Running in the foreground shows what it's doing:
 
 ```
-  khotan-observer  0.1.17
+  khotan-observer  0.1.18
 
     Sources    claude, codex, cursor
     Allow      podium-automation, chief-nutrition · 2 ready
