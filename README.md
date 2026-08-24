@@ -63,7 +63,7 @@ It does not delete the original AI-tool transcripts or reset their offsets.
 Running in the foreground shows what it's doing:
 
 ```
-  khotan-observer  0.1.10
+  khotan-observer  0.1.11
 
     Device     3f88991f7ee379a1589ab29795e43b0c
     Sources    claude, codex, cursor
