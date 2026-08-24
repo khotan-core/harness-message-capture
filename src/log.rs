@@ -1,5 +1,5 @@
 use crate::record::now_ms;
-use owo_colors::{OwoColorize, Stream::Stderr};
+use owo_colors::{OwoColorize, Stream::Stderr, Style};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
@@ -134,8 +134,52 @@ fn allow_line(allow: &[String], routes: usize) -> String {
     format!("{names} · {ready}")
 }
 
-/// The Khotan wordmark, downsampled from the brand logo into half-block cells.
-/// Every row is `WORDMARK_COLS` characters wide.
+/// The Khotan logomark: indigo shapes on a coral tile. One character in this
+/// grid is one pixel, `#` indigo and `.` coral. Two pixel rows print as one
+/// text row, so the mark keeps a square aspect next to the wordmark.
+const MARK: [&str; 12] = [
+    "..............",
+    ".#######......",
+    ".#######..#...",
+    ".######..####.",
+    ".#####..#####.",
+    ".####..######.",
+    ".......######.",
+    ".#####.######.",
+    ".######.#####.",
+    ".#######.####.",
+    ".#######.####.",
+    "..............",
+];
+
+const MARK_COLS: usize = 14;
+
+const INDIGO: (u8, u8, u8) = (79, 95, 146);
+const CORAL: (u8, u8, u8) = (240, 74, 34);
+
+/// One text row of the mark. `▀` paints the upper pixel as foreground and the
+/// lower pixel as background, so a single cell carries both.
+fn mark_row(row: usize) -> String {
+    let upper = MARK[row * 2].as_bytes();
+    let lower = MARK[row * 2 + 1].as_bytes();
+    let mut out = String::with_capacity(MARK_COLS * 24);
+    for col in 0..MARK_COLS {
+        let (fr, fg, fb) = if upper[col] == b'#' { INDIGO } else { CORAL };
+        let (br, bg, bb) = if lower[col] == b'#' { INDIGO } else { CORAL };
+        let style = Style::new().truecolor(fr, fg, fb).on_truecolor(br, bg, bb);
+        out.push_str(&"▀".if_supports_color(Stderr, |t| t.style(style)).to_string());
+    }
+    out
+}
+
+/// The mark is only legible in colour; without it every cell collapses to an
+/// identical `▀`. Probe the same machinery the rest of the output uses.
+fn colour_enabled() -> bool {
+    "x".if_supports_color(Stderr, |t| t.red()).to_string() != "x"
+}
+
+/// The Khotan wordmark, drawn directly on the character grid so every stroke
+/// is two cells wide. Every row is `WORDMARK_COLS` characters wide.
 const WORDMARK: [&str; 6] = [
     "██╗  ██╗██╗  ██╗ ██████╗ ████████╗ █████╗ ███╗   ██╗",
     "██║ ██╔╝██║  ██║██╔═══██╗╚══██╔══╝██╔══██╗████╗  ██║",
@@ -150,6 +194,9 @@ const WORDMARK_COLS: usize = 52;
 /// Art plus the two-space indent on each side.
 const WORDMARK_MIN_COLS: usize = WORDMARK_COLS + 4;
 
+/// The full lockup: mark, a two-space gap, wordmark, and the outer indent.
+const LOCKUP_MIN_COLS: usize = MARK_COLS + 2 + WORDMARK_MIN_COLS;
+
 /// Terminal width, when we can learn it without a syscall crate. `COLUMNS` is
 /// the only source we trust here; `None` means "unknown, assume wide enough".
 fn term_cols() -> Option<usize> {
@@ -162,6 +209,12 @@ fn wordmark_fits(is_tty: bool, cols: Option<usize>) -> bool {
     is_tty && cols.is_none_or(|c| c >= WORDMARK_MIN_COLS)
 }
 
+/// The mark joins the wordmark only when it is legible and the window is wide
+/// enough to hold both on one line.
+fn lockup_fits(is_tty: bool, cols: Option<usize>, colour: bool) -> bool {
+    is_tty && colour && cols.is_none_or(|c| c >= LOCKUP_MIN_COLS)
+}
+
 /// Startup summary printed once when the watcher comes up.
 pub fn banner(sources: &[&str], routes: usize, allow: &[String], ready_ms: u128) {
     let version = env!("CARGO_PKG_VERSION");
@@ -170,8 +223,20 @@ pub fn banner(sources: &[&str], routes: usize, allow: &[String], ready_ms: u128)
     } else {
         sources.join(", ")
     };
+    let is_tty = std::io::stderr().is_terminal();
+    let cols = term_cols();
     eprintln!();
-    if wordmark_fits(std::io::stderr().is_terminal(), term_cols()) {
+    if lockup_fits(is_tty, cols, colour_enabled()) {
+        for (i, line) in WORDMARK.iter().enumerate() {
+            eprintln!("  {}  {}", mark_row(i), coral(line));
+        }
+        eprintln!();
+        eprintln!(
+            "  {}  {}",
+            "observer".if_supports_color(Stderr, |t| t.bold()),
+            version.if_supports_color(Stderr, |t| t.dimmed()),
+        );
+    } else if wordmark_fits(is_tty, cols) {
         for line in WORDMARK {
             eprintln!("  {}", coral(line));
         }
@@ -298,6 +363,36 @@ mod tests {
         for line in super::WORDMARK {
             assert_eq!(line.chars().count(), super::WORDMARK_COLS, "{line}");
         }
+    }
+
+    #[test]
+    fn mark_is_a_rectangle_of_two_pixel_values() {
+        assert_eq!(super::MARK.len() % 2, 0, "needs whole text rows");
+        for line in super::MARK {
+            assert_eq!(line.chars().count(), super::MARK_COLS, "{line}");
+            assert!(line.chars().all(|c| c == '#' || c == '.'), "{line}");
+        }
+    }
+
+    #[test]
+    fn mark_row_emits_one_cell_per_column() {
+        for row in 0..super::MARK.len() / 2 {
+            let rendered = super::mark_row(row);
+            assert_eq!(rendered.chars().filter(|c| *c == '▀').count(), super::MARK_COLS);
+        }
+    }
+
+    #[test]
+    fn lockup_needs_colour_and_width() {
+        assert!(super::lockup_fits(true, None, true));
+        assert!(!super::lockup_fits(true, None, false));
+        assert!(!super::lockup_fits(false, None, true));
+        assert!(super::lockup_fits(true, Some(super::LOCKUP_MIN_COLS), true));
+        assert!(!super::lockup_fits(
+            true,
+            Some(super::LOCKUP_MIN_COLS - 1),
+            true
+        ));
     }
 
     #[test]
