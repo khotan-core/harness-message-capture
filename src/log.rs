@@ -395,6 +395,23 @@ pub fn warn(msg: &str) {
     eprintln!("  {}   {}", dim(&clock()), orange(msg));
 }
 
+fn alert_body(msg: &str) -> String {
+    format!(" ALERT  {msg} ")
+}
+
+/// Bright-red reverse bar. Used only for "a newer observer is out" so that
+/// line cannot sit in the same orange as a skip warning.
+pub fn alert(msg: &str) {
+    let painted = alert_body(msg)
+        .if_supports_color(Stderr, |t| {
+            format!("{}", t.on_truecolor(255, 32, 32).bright_white().bold())
+        })
+        .to_string();
+    eprintln!();
+    eprintln!("  {}   {}", dim(&clock()), painted);
+    eprintln!();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_offset, thousands};
@@ -472,6 +489,14 @@ mod tests {
             true,
             Some(super::WORDMARK_MIN_COLS - 1)
         ));
+    }
+
+    #[test]
+    fn alert_body_leads_with_alert() {
+        assert_eq!(
+            super::alert_body("Newer observer v0.1.20 is out (this binary is 0.1.19)"),
+            " ALERT  Newer observer v0.1.20 is out (this binary is 0.1.19) "
+        );
     }
 
     #[test]

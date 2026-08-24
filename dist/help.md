@@ -40,10 +40,13 @@ The endpoint did not accept those 188 lines. They stay on disk.
 
 None of the transcript roots exist on this machine.
 
-`Newer observer v0.1.17 is out (this binary is 0.1.16)`
+## Startup alerts (red)
+
+`ALERT  Newer observer v0.1.17 is out (this binary is 0.1.16)`
 
 GitHub Releases has a newer tagged build than this binary. Capture still
-runs. Reinstall to pick up the new binary.
+runs. The line prints as a bright-red bar so it cannot hide in skip noise.
+Reinstall to pick up the new binary.
 
 ## Skip reasons (orange)
 

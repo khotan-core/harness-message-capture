@@ -18,7 +18,7 @@ pub fn warn_if_stale() {
         .name("update-check".into())
         .spawn(move || {
             if let Some(msg) = stale_message(current, LATEST_RELEASE) {
-                crate::log::warn(&msg);
+                crate::log::alert(&msg);
             }
         });
 }

@@ -79,8 +79,8 @@ Running in the foreground shows what it's doing:
   15:58:05   idle (No new lines this pass · 3,952 files)
 ```
 
-If GitHub has a newer tagged release, `run` prints an orange warn after
-the banner. Capture still starts.
+If GitHub has a newer tagged release, `run` prints a bright-red `ALERT`
+after the banner. Capture still starts.
 
 Each workspace prints on its own line. Counts on that line belong to that
 folder only:
