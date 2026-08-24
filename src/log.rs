@@ -1,5 +1,6 @@
 use crate::record::now_ms;
 use owo_colors::{OwoColorize, Stream::Stderr};
+use std::io::IsTerminal;
 use std::sync::OnceLock;
 
 static OFFSET: OnceLock<i64> = OnceLock::new();
@@ -57,6 +58,13 @@ pub fn green(s: &str) -> String {
     s.if_supports_color(Stderr, |t| t.green()).to_string()
 }
 
+/// Brand coral, sampled from the Khotan logo. Reserved for the wordmark so the
+/// tone stays distinct from the colours that carry a status meaning.
+pub fn coral(s: &str) -> String {
+    s.if_supports_color(Stderr, |t| t.truecolor(240, 74, 34))
+        .to_string()
+}
+
 pub fn dim(s: &str) -> String {
     s.if_supports_color(Stderr, |t| t.dimmed()).to_string()
 }
@@ -97,6 +105,33 @@ fn allow_line(allow: &[String], routes: usize) -> String {
     format!("{names} · {ready}")
 }
 
+/// The Khotan wordmark, downsampled from the brand logo into half-block cells.
+/// Every row is `WORDMARK_COLS` characters wide.
+const WORDMARK: [&str; 5] = [
+    "▄▄   ▄▄  ▄▄   ▄▄    ▄▄▄▄  ▄▄▄▄▄▄  ▄▄     ▄▄   ▄▄",
+    "██ ▄█▀   ██   ██  ▄██▀▀██▄▀▀██▀▀ ███▄    ███  ██",
+    "████▄    ███████  ██    ██  ██  ▄████▄   ████▄██",
+    "██ ▀█▄   ██   ██  ▀█▄▄▄▄█▀  ██  ██▀▀██   ██ ▀███",
+    "▀▀  ▀▀▀  ▀▀   ▀▀   ▀▀▀▀▀    ▀▀ ▀▀    ▀▀  ▀▀   ▀▀",
+];
+
+const WORDMARK_COLS: usize = 48;
+
+/// Art plus the two-space indent on each side.
+const WORDMARK_MIN_COLS: usize = WORDMARK_COLS + 4;
+
+/// Terminal width, when we can learn it without a syscall crate. `COLUMNS` is
+/// the only source we trust here; `None` means "unknown, assume wide enough".
+fn term_cols() -> Option<usize> {
+    std::env::var("COLUMNS").ok()?.trim().parse().ok()
+}
+
+/// The wordmark is for a person watching `khotan-observer run`. Block art in
+/// the LaunchAgent log would only bloat a file nobody reads for decoration.
+fn wordmark_fits(is_tty: bool, cols: Option<usize>) -> bool {
+    is_tty && cols.is_none_or(|c| c >= WORDMARK_MIN_COLS)
+}
+
 /// Startup summary printed once when the watcher comes up.
 pub fn banner(sources: &[&str], routes: usize, allow: &[String], ready_ms: u128) {
     let version = env!("CARGO_PKG_VERSION");
@@ -106,11 +141,23 @@ pub fn banner(sources: &[&str], routes: usize, allow: &[String], ready_ms: u128)
         sources.join(", ")
     };
     eprintln!();
-    eprintln!(
-        "  {}  {}",
-        "khotan-observer".if_supports_color(Stderr, |t| t.bold()),
-        version.if_supports_color(Stderr, |t| t.dimmed()),
-    );
+    if wordmark_fits(std::io::stderr().is_terminal(), term_cols()) {
+        for line in WORDMARK {
+            eprintln!("  {}", coral(line));
+        }
+        eprintln!();
+        eprintln!(
+            "  {}  {}",
+            "observer".if_supports_color(Stderr, |t| t.bold()),
+            version.if_supports_color(Stderr, |t| t.dimmed()),
+        );
+    } else {
+        eprintln!(
+            "  {}  {}",
+            "khotan-observer".if_supports_color(Stderr, |t| t.bold()),
+            version.if_supports_color(Stderr, |t| t.dimmed()),
+        );
+    }
     eprintln!();
     row("Sources", &src);
     row("Allow", &allow_line(allow, routes));
@@ -223,6 +270,29 @@ mod tests {
         assert_eq!(thousands(950), "950");
         assert_eq!(thousands(3_950), "3,950");
         assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn wordmark_rows_share_one_width() {
+        for line in super::WORDMARK {
+            assert_eq!(line.chars().count(), super::WORDMARK_COLS, "{line}");
+        }
+    }
+
+    #[test]
+    fn wordmark_stays_out_of_the_log_file() {
+        assert!(!super::wordmark_fits(false, None));
+        assert!(!super::wordmark_fits(false, Some(200)));
+    }
+
+    #[test]
+    fn wordmark_needs_room_to_avoid_wrapping() {
+        assert!(super::wordmark_fits(true, None));
+        assert!(super::wordmark_fits(true, Some(super::WORDMARK_MIN_COLS)));
+        assert!(!super::wordmark_fits(
+            true,
+            Some(super::WORDMARK_MIN_COLS - 1)
+        ));
     }
 
     #[test]
