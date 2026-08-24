@@ -15,10 +15,10 @@ pub struct Config {
     pub token: Option<String>,
     /// Stable identifier for this install, generated once at enrollment.
     pub device_id: String,
-    /// How often (seconds) to run the fallback rescan even without fs events.
+    /// Fallback rescan interval. Preset. Not a user-facing setting.
     #[serde(default = "default_poll_secs")]
     pub poll_secs: u64,
-    /// Max records per upload batch.
+    /// Max records per upload batch. Preset. Not a user-facing setting.
     #[serde(default = "default_batch")]
     pub batch: usize,
     /// Roots searched for customer repositories and worktrees.
@@ -77,7 +77,9 @@ impl Config {
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str("# khotan-observer machine config\n");
-        out.push_str("# Restart is not required. The next scan reads this file.\n\n");
+        out.push_str("# The next scan reads this file. Restart is not required.\n");
+        out.push_str("# poll_secs, batch, and search_roots are presets.\n");
+        out.push_str("# Edit only allow_repos, or run: khotan-observer configure --allow-repo <folder>\n\n");
         out.push_str(&format!("device_id = {}\n", toml_quote(&self.device_id)));
         out.push_str(&format!("poll_secs = {}\n", self.poll_secs));
         out.push_str(&format!("batch = {}\n\n", self.batch));

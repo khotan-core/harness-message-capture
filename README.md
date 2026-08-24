@@ -23,11 +23,14 @@ KHOTAN_OBSERVER_VERSION=v0.1.0 \
   curl -fsSL https://raw.githubusercontent.com/khotan-core/harness-message-capture/main/dist/install.sh | bash
 ```
 
-## Configure & run
+## Choose repositories and run
+
+The installer writes `~/.config/harness-message-capture/config.toml` with
+preset poll and batch values. The only setting you choose is which
+repositories may upload.
 
 ```bash
-# Creates ~/.config/harness-message-capture/config.toml if it is missing.
-khotan-observer configure --poll 45 --batch 200
+khotan-observer configure --allow-repo podium-automation --allow-repo chief-nutrition
 
 # Foreground — live log. Ctrl-C stops the observer and returns to the shell.
 khotan-observer run
@@ -116,9 +119,9 @@ they are never copied into message records, queue metadata, or logs. Repositorie
 without a valid destination are skipped and their offsets advance, so adding a
 destination later does not retroactively upload old chats.
 
-Edit `allow_repos` in `~/.config/harness-message-capture/config.toml` to choose
-which repositories upload. The installer writes this file. Each entry must be
-the exact folder name. `podium-automation` does not match
+To choose which repositories upload, run `configure --allow-repo` or edit
+`allow_repos` in `~/.config/harness-message-capture/config.toml`. Each entry
+must be the exact folder name. `podium-automation` does not match
 `podium-automation-mirror`. An empty list sends nothing. The next scan reads
 the file; you do not need to restart.
 

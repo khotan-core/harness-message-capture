@@ -71,7 +71,7 @@ The release profile in `Cargo.toml` optimizes for a small always-on binary (`opt
 Installed-binary workflow (user machine):
 
 ```bash
-khotan-observer configure --poll 45 --batch 200 --allow-repo customer-repo
+khotan-observer configure --allow-repo customer-repo
 khotan-observer run
 khotan-observer start
 khotan-observer logs

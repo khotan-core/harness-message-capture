@@ -57,7 +57,7 @@ fn print_help() {
         "khotan-observer — capture local AI coding-agent transcripts\n\
          \n\
          USAGE:\n\
-           khotan-observer configure [--poll <seconds>] [--batch <count>] [--search-root <path>]\n\
+           khotan-observer configure [--allow-repo <folder>] [...]\n\
            khotan-observer run          Capture in the foreground (Ctrl-C stops and returns to the shell)\n\
            khotan-observer start        Install & start the background LaunchAgent\n\
            khotan-observer stop         Stop the background LaunchAgent\n\
@@ -73,61 +73,56 @@ fn print_help() {
 
 #[derive(Debug, PartialEq, Eq)]
 struct ConfigureArgs {
-    poll: Option<u64>,
-    batch: Option<usize>,
-    search_roots: Vec<PathBuf>,
+    allow_repos: Option<Vec<String>>,
 }
 
 fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
-    let mut poll = None;
-    let mut batch = None;
-    let mut search_roots = Vec::new();
+    let mut allow_repos = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--poll" => {
-                let value = args.get(i + 1).context("--poll requires seconds")?;
-                poll = Some(value.parse().context("--poll requires seconds")?);
+            "--allow-repo" => {
+                let value = args
+                    .get(i + 1)
+                    .context("--allow-repo requires a folder name")?;
+                if value.starts_with('-') || value.is_empty() {
+                    anyhow::bail!("--allow-repo requires a folder name");
+                }
+                allow_repos
+                    .get_or_insert_with(Vec::new)
+                    .push(value.clone());
                 i += 2;
             }
-            "--batch" => {
-                let value = args.get(i + 1).context("--batch requires a count")?;
-                batch = Some(value.parse().context("--batch requires a count")?);
-                i += 2;
-            }
-            "--search-root" => {
-                let value = args.get(i + 1).context("--search-root requires a path")?;
-                search_roots.push(PathBuf::from(value));
-                i += 2;
+            "--poll" | "--batch" | "--search-root" => {
+                anyhow::bail!(
+                    "poll, batch, and search roots are presets; use --allow-repo <folder>"
+                )
             }
             other => anyhow::bail!("unknown flag: {other}"),
         }
     }
-    Ok(ConfigureArgs {
-        poll,
-        batch,
-        search_roots,
-    })
+    Ok(ConfigureArgs { allow_repos })
 }
 
 fn configure(args: &[String]) -> Result<()> {
     let parsed = parse_configure_args(args)?;
     let mut cfg = Config::load().unwrap_or(Config::fresh(config::random_id()?));
-    if let Some(poll) = parsed.poll {
-        cfg.poll_secs = poll;
-    }
-    if let Some(batch) = parsed.batch {
-        cfg.batch = batch;
-    }
-    if !parsed.search_roots.is_empty() {
-        cfg.search_roots = parsed.search_roots;
+    if let Some(allow_repos) = parsed.allow_repos {
+        cfg.allow_repos = allow_repos;
     }
     cfg.endpoint = None;
     cfg.token = None;
     cfg.save()?;
     println!("configured. device_id={}", cfg.device_id);
     println!("config: {}", config::config_path().display());
-    println!("edit allow_repos in that file to choose which repositories upload");
+    if cfg.allow_repos.is_empty() {
+        println!("allow_repos: none — add one with: khotan-observer configure --allow-repo <folder>");
+    } else {
+        println!("allow_repos:");
+        for name in &cfg.allow_repos {
+            println!("  {name}");
+        }
+    }
     Ok(())
 }
 
@@ -156,7 +151,7 @@ fn status() -> Result<()> {
     }
     println!("config    : {}", config::config_path().display());
     if cfg.allow_repos.is_empty() {
-        println!("allow     : none — edit allow_repos in the config file");
+        println!("allow     : none — khotan-observer configure --allow-repo <folder>");
     } else {
         println!("allow     :");
         for name in &cfg.allow_repos {
@@ -601,25 +596,31 @@ mod tests {
     #[test]
     fn parse_configure_defaults() {
         let parsed = parse_configure_args(&s(&[])).unwrap();
-        assert_eq!(parsed.poll, None);
-        assert_eq!(parsed.batch, None);
-        assert!(parsed.search_roots.is_empty());
+        assert_eq!(parsed.allow_repos, None);
     }
 
     #[test]
-    fn parse_configure_optional_flags() {
+    fn parse_configure_allow_repos() {
         let parsed = parse_configure_args(&s(&[
-            "--poll",
-            "10",
-            "--batch",
-            "50",
-            "--search-root",
-            "/work/customers",
+            "--allow-repo",
+            "podium-automation",
+            "--allow-repo",
+            "chief-nutrition",
         ]))
         .unwrap();
-        assert_eq!(parsed.poll, Some(10));
-        assert_eq!(parsed.batch, Some(50));
-        assert_eq!(parsed.search_roots, vec![PathBuf::from("/work/customers")]);
+        assert_eq!(
+            parsed.allow_repos,
+            Some(vec![
+                "podium-automation".to_string(),
+                "chief-nutrition".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_configure_rejects_preset_flags() {
+        let err = parse_configure_args(&s(&["--poll", "30"])).unwrap_err();
+        assert!(err.to_string().contains("presets"));
     }
 
     #[test]

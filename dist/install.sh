@@ -10,8 +10,8 @@
 #   KHOTAN_OBSERVER_REPO=khotan-core/harness-message-capture
 #
 # After install:
-#   khotan-observer configure
-#   khotan-observer run
+#   khotan-observer configure --allow-repo your-repo
+#   khotan-observer start
 #
 # Note: a binary fetched via curl is NOT flagged with the macOS quarantine
 # attribute, so no Apple code-signing/notarization is required for it to run.
@@ -117,7 +117,7 @@ if [[ "$WAS_RUNNING" -eq 1 ]]; then
   echo "==> Restarting background observer"
   "$BIN_PATH" start
   echo ""
-  echo "Upgrade complete. Edit allow_repos in $CONFIG"
+  echo "Upgrade complete. Set repos with: khotan-observer configure --allow-repo <folder>"
   echo "Follow it with: khotan-observer logs"
   echo ""
   exit 0
@@ -125,7 +125,6 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "  1. Edit allow_repos in $CONFIG"
-echo "  2. khotan-observer run          # foreground, live log"
-echo "     or: khotan-observer start    # background LaunchAgent"
+echo "  1. khotan-observer configure --allow-repo <folder>"
+echo "  2. khotan-observer start"
 echo ""
