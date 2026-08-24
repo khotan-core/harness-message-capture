@@ -24,6 +24,10 @@ pub struct Config {
     /// Roots searched for customer repositories and worktrees.
     #[serde(default = "default_search_roots")]
     pub search_roots: Vec<PathBuf>,
+    /// When non-empty, only these repository names or absolute paths are
+    /// captured. Empty keeps today's behavior: every dest-bearing repo.
+    #[serde(default)]
+    pub allow_repos: Vec<String>,
 }
 
 fn default_poll_secs() -> u64 {
@@ -78,6 +82,7 @@ impl Config {
             poll_secs: default_poll_secs(),
             batch: default_batch(),
             search_roots: default_search_roots(),
+            allow_repos: Vec::new(),
         }
     }
 }

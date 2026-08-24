@@ -34,6 +34,50 @@ impl RouteRef {
     }
 }
 
+/// True when this workspace may be captured. An empty allowlist permits every
+/// dest-bearing repository. Names match the directory leaf; absolute paths
+/// match the workspace or a parent of it.
+pub fn workspace_allowed(workspace: &Path, allow: &[String]) -> bool {
+    if allow.is_empty() {
+        return true;
+    }
+    if matches_allow(workspace, allow) {
+        return true;
+    }
+    match primary_repo_for_worktree(workspace) {
+        Ok(Some(primary)) if primary != workspace => matches_allow(&primary, allow),
+        _ => false,
+    }
+}
+
+fn matches_allow(workspace: &Path, allow: &[String]) -> bool {
+    allow.iter().any(|entry| {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        let path = Path::new(entry);
+        if path.is_absolute() {
+            workspace == path || workspace.starts_with(path)
+        } else {
+            workspace
+                .file_name()
+                .is_some_and(|name| name == entry)
+        }
+    })
+}
+
+/// True when a queued route still belongs on the allowlist.
+pub fn route_allowed(route: &RouteRef, allow: &[String]) -> bool {
+    if allow.is_empty() {
+        return true;
+    }
+    if let Some(parent) = route.credential_path.parent() {
+        return workspace_allowed(parent, allow);
+    }
+    allow.iter().any(|entry| entry.trim() == route.label)
+}
+
 /// Find the authoritative repo-local route for a resolved harness workspace.
 /// No ambient process environment or machine-global Khotan profile is used.
 pub fn resolve(workspace: &Path) -> Result<Option<RouteRef>> {
@@ -199,10 +243,13 @@ pub fn parse_env(contents: &str) -> BTreeMap<String, String> {
     map
 }
 
-pub fn discover_routes(workspaces: &[PathBuf]) -> Vec<RouteRef> {
+pub fn discover_routes(workspaces: &[PathBuf], allow: &[String]) -> Vec<RouteRef> {
     let mut seen = BTreeSet::new();
     let mut routes = Vec::new();
     for workspace in workspaces {
+        if !workspace_allowed(workspace, allow) {
+            continue;
+        }
         if let Ok(Some(route)) = resolve(workspace) {
             if seen.insert((route.org_id.clone(), route.api_url.clone())) {
                 routes.push(route);
@@ -325,7 +372,7 @@ mod tests {
         let two = temp_repo("two");
         write_env(&one, ENV_FILE, "https://same.example", "one", "org");
         write_env(&two, ENV_FILE, "https://same.example/", "two", "org");
-        let routes = discover_routes(&[one.clone(), two.clone()]);
+        let routes = discover_routes(&[one.clone(), two.clone()], &[]);
         assert_eq!(routes.len(), 1);
         let _ = fs::remove_dir_all(one);
         let _ = fs::remove_dir_all(two);
@@ -356,5 +403,46 @@ mod tests {
         assert_eq!(route.credential_path, repo.join(ENV_FILE));
         let _ = fs::remove_dir_all(worktree);
         let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn empty_allowlist_permits_every_workspace() {
+        let repo = PathBuf::from("/Users/a/Developer/customer");
+        assert!(workspace_allowed(&repo, &[]));
+    }
+
+    #[test]
+    fn blank_allow_entries_match_nothing() {
+        let repo = PathBuf::from("/Users/a/Developer/customer");
+        assert!(!workspace_allowed(&repo, &["".into()]));
+    }
+
+    #[test]
+    fn allowlist_matches_leaf_name_or_absolute_path() {
+        let repo = PathBuf::from("/Users/a/Developer/customer");
+        assert!(workspace_allowed(&repo, &["customer".into()]));
+        assert!(workspace_allowed(
+            &repo,
+            &["/Users/a/Developer/customer".into()]
+        ));
+        assert!(workspace_allowed(&repo, &["/Users/a/Developer".into()]));
+        assert!(!workspace_allowed(&repo, &["other".into()]));
+        assert!(!workspace_allowed(
+            &repo,
+            &["/Users/a/Developer-extra".into()]
+        ));
+    }
+
+    #[test]
+    fn route_allowlist_uses_credential_parent() {
+        let route = RouteRef::new(
+            "https://customer.example".into(),
+            "org".into(),
+            PathBuf::from("/Users/a/Developer/customer/env.khotan.local"),
+            "customer".into(),
+        );
+        assert!(route_allowed(&route, &["customer".into()]));
+        assert!(!route_allowed(&route, &["other".into()]));
+        assert!(route_allowed(&route, &[]));
     }
 }

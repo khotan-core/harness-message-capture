@@ -57,7 +57,7 @@ fn print_help() {
         "khotan-observer — capture local AI coding-agent transcripts\n\
          \n\
          USAGE:\n\
-           khotan-observer configure [--poll <seconds>] [--batch <count>] [--search-root <path>]\n\
+           khotan-observer configure [--poll <seconds>] [--batch <count>] [--search-root <path>] [--allow-repo <name>] [--allow-all]\n\
            khotan-observer run          Capture in the foreground (Ctrl-C to stop)\n\
            khotan-observer start        Install & start the background LaunchAgent\n\
            khotan-observer stop         Stop the background LaunchAgent\n\
@@ -76,12 +76,16 @@ struct ConfigureArgs {
     poll: Option<u64>,
     batch: Option<usize>,
     search_roots: Vec<PathBuf>,
+    allow_repos: Vec<String>,
+    allow_all: bool,
 }
 
 fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
     let mut poll = None;
     let mut batch = None;
     let mut search_roots = Vec::new();
+    let mut allow_repos = Vec::new();
+    let mut allow_all = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -100,13 +104,27 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
                 search_roots.push(PathBuf::from(value));
                 i += 2;
             }
+            "--allow-repo" => {
+                let value = args.get(i + 1).context("--allow-repo requires a name or path")?;
+                allow_repos.push(value.clone());
+                i += 2;
+            }
+            "--allow-all" => {
+                allow_all = true;
+                i += 1;
+            }
             other => anyhow::bail!("unknown flag: {other}"),
         }
+    }
+    if allow_all && !allow_repos.is_empty() {
+        anyhow::bail!("use --allow-repo or --allow-all, not both");
     }
     Ok(ConfigureArgs {
         poll,
         batch,
         search_roots,
+        allow_repos,
+        allow_all,
     })
 }
 
@@ -121,6 +139,14 @@ fn configure(args: &[String]) -> Result<()> {
     }
     if !parsed.search_roots.is_empty() {
         cfg.search_roots = parsed.search_roots;
+    }
+    if parsed.allow_all {
+        cfg.allow_repos.clear();
+    } else if !parsed.allow_repos.is_empty() {
+        let mut allow = parsed.allow_repos;
+        allow.sort();
+        allow.dedup();
+        cfg.allow_repos = allow;
     }
     cfg.endpoint = None;
     cfg.token = None;
@@ -154,8 +180,16 @@ fn status() -> Result<()> {
     for root in &cfg.search_roots {
         println!("  {}", root.display());
     }
+    if cfg.allow_repos.is_empty() {
+        println!("allow     : all destination repositories");
+    } else {
+        println!("allow     :");
+        for name in &cfg.allow_repos {
+            println!("  {name}");
+        }
+    }
     let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
-    let routes = destination::discover_routes(workspaces.candidates());
+    let routes = destination::discover_routes(workspaces.candidates(), &cfg.allow_repos);
     println!("customer routes: {}", routes.len());
     for route in routes {
         println!("  {}", route.label);
@@ -221,7 +255,7 @@ fn watch() -> Result<()> {
 
     let tools: Vec<&str> = srcs.iter().map(|s| s.tool).collect();
     let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
-    let route_count = destination::discover_routes(workspaces.candidates()).len();
+    let route_count = destination::discover_routes(workspaces.candidates(), &cfg.allow_repos).len();
     log::banner(
         &cfg.device_id,
         &tools,
@@ -305,7 +339,7 @@ fn scan_and_ship(
     }
 
     let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
-    let files = capture::collect_new(srcs, offsets, &workspaces);
+    let files = capture::collect_new(srcs, offsets, &workspaces, &cfg.allow_repos);
     let mut summary_records = Vec::new();
     let mut offsets_changed = false;
     for file in files {
@@ -363,6 +397,9 @@ fn drain(cfg: &Config, spool: &Spool) -> (usize, Vec<String>) {
     let mut uploaded = 0;
     let mut warnings = Vec::new();
     for queued in spool.routes() {
+        if !destination::route_allowed(&queued.route, &cfg.allow_repos) {
+            continue;
+        }
         loop {
             let batch = match spool.peek(&queued.route, cfg.batch) {
                 Ok(batch) => batch,
@@ -569,6 +606,8 @@ mod tests {
         assert_eq!(parsed.poll, None);
         assert_eq!(parsed.batch, None);
         assert!(parsed.search_roots.is_empty());
+        assert!(parsed.allow_repos.is_empty());
+        assert!(!parsed.allow_all);
     }
 
     #[test]
@@ -580,11 +619,30 @@ mod tests {
             "50",
             "--search-root",
             "/work/customers",
+            "--allow-repo",
+            "customer",
+            "--allow-repo",
+            "other",
         ]))
         .unwrap();
         assert_eq!(parsed.poll, Some(10));
         assert_eq!(parsed.batch, Some(50));
         assert_eq!(parsed.search_roots, vec![PathBuf::from("/work/customers")]);
+        assert_eq!(parsed.allow_repos, vec!["customer", "other"]);
+        assert!(!parsed.allow_all);
+    }
+
+    #[test]
+    fn parse_configure_allow_all_clears_list() {
+        let parsed = parse_configure_args(&s(&["--allow-all"])).unwrap();
+        assert!(parsed.allow_all);
+        assert!(parsed.allow_repos.is_empty());
+    }
+
+    #[test]
+    fn parse_configure_rejects_allow_repo_with_allow_all() {
+        let err = parse_configure_args(&s(&["--allow-all", "--allow-repo", "customer"])).unwrap_err();
+        assert!(err.to_string().contains("not both"));
     }
 
     #[test]

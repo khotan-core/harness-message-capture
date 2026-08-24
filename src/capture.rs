@@ -68,11 +68,12 @@ pub fn collect_new(
     sources: &[Source],
     offsets: &Offsets,
     workspaces: &WorkspaceIndex,
+    allow_repos: &[String],
 ) -> Vec<CapturedFile> {
     let mut captured = Vec::new();
     for src in sources {
         for file in jsonl_files(&src.root) {
-            match read_file(src, &file, offsets, workspaces) {
+            match read_file(src, &file, offsets, workspaces, allow_repos) {
                 Ok(Some(result)) => captured.push(result),
                 Ok(None) | Err(_) => continue,
             }
@@ -86,6 +87,7 @@ fn read_file(
     file: &Path,
     offsets: &Offsets,
     workspaces: &WorkspaceIndex,
+    allow_repos: &[String],
 ) -> Result<Option<CapturedFile>> {
     let key = file.to_string_lossy().to_string();
     let meta = fs::metadata(file).with_context(|| format!("stat {}", file.display()))?;
@@ -119,6 +121,9 @@ fn read_file(
     let (project, session_id) = provenance(src.tool, file, &src.root, workspace);
     let (route, route_warning, advance_unrouted) = match workspace_result {
         Err(error) => (None, Some(format!("{project}: {error}")), false),
+        Ok(Some(workspace)) if !destination::workspace_allowed(&workspace, allow_repos) => {
+            (None, None, true)
+        }
         Ok(Some(workspace)) => match destination::resolve(&workspace) {
             Ok(route) => (route, None, true),
             Err(error) => (None, Some(format!("{}: {error}", project)), false),
@@ -350,7 +355,7 @@ mod tests {
             root: source_root,
         };
         let workspaces = WorkspaceIndex::from_candidates(vec![workspace]);
-        let captured = collect_new(&[source], &offsets, &workspaces);
+        let captured = collect_new(&[source], &offsets, &workspaces, &[]);
 
         assert_eq!(captured.len(), 1);
         assert!(captured[0].route.is_some());
@@ -370,10 +375,25 @@ mod tests {
             }],
             &offsets,
             &workspaces,
+            &[],
         );
         assert_eq!(blocked.len(), 1);
         assert!(!blocked[0].advance_unrouted);
         assert!(blocked[0].route_warning.is_some());
+
+        let skipped = collect_new(
+            &[Source {
+                tool: "cursor",
+                root: transcript.ancestors().nth(4).unwrap().to_path_buf(),
+            }],
+            &offsets,
+            &workspaces,
+            &["other-customer".into()],
+        );
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].route.is_none());
+        assert!(skipped[0].advance_unrouted);
+        assert!(skipped[0].route_warning.is_none());
         let _ = fs::remove_dir_all(temp);
     }
 }

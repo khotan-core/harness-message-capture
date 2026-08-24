@@ -27,7 +27,8 @@ KHOTAN_OBSERVER_VERSION=v0.1.0 \
 
 ```bash
 # Optional tuning. Customer destinations are discovered from repositories.
-khotan-observer configure --poll 45 --batch 200
+# --allow-repo limits capture to named checkouts. Repeat the flag for more.
+khotan-observer configure --poll 45 --batch 200 --allow-repo customer-repo
 
 # Foreground — live log, Ctrl-C to stop.
 khotan-observer run
@@ -114,6 +115,19 @@ they are never copied into message records, queue metadata, or logs. Repositorie
 without a valid destination are skipped and their offsets advance, so adding a
 destination later does not retroactively upload old chats.
 
+A machine allowlist can narrow that further. When `allow_repos` is set in
+`~/.config/harness-message-capture/config.toml`, only those repository names
+or absolute paths are captured. Other dest-bearing workspaces are skipped and
+their offsets still advance. Leave the list empty to capture every repository
+that has a valid destination. `configure --allow-all` clears the list.
+
+```bash
+khotan-observer configure --allow-repo customer-one --allow-repo customer-two
+```
+
+Records already queued for a repo that is no longer allowed stay on disk until
+`khotan-observer clear-queue --yes`. The observer does not keep retrying them.
+
 ## Local inbox reader
 
 The bundled receiver remains useful for inspecting the legacy batch shape:
@@ -187,5 +201,6 @@ installer always targets `releases/latest` unless `KHOTAN_OBSERVER_VERSION` is s
 
 This tool is intended for consented employee installs. Nothing is uploaded for
 a workspace unless its repository contains a complete, organization-verified
-Khotan destination. Secrets are scrubbed on-device before leaving the machine;
-see `src/redact.rs` for the pattern list.
+Khotan destination. When a machine allowlist is set, the workspace must also
+match it. Secrets are scrubbed on-device before leaving the machine; see
+`src/redact.rs` for the pattern list.
