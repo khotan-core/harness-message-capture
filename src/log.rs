@@ -72,6 +72,18 @@ fn row(label: &str, value: &str) {
     );
 }
 
+fn stop_hint() -> &'static str {
+    stop_hint_for(std::env::var_os(crate::agent::BACKGROUND_MODE_ENV).as_deref())
+}
+
+fn stop_hint_for(mode: Option<&std::ffi::OsStr>) -> &'static str {
+    if mode == Some(std::ffi::OsStr::new("background")) {
+        "· khotan-observer stop to quit"
+    } else {
+        "· Ctrl-C to stop"
+    }
+}
+
 /// Startup summary printed once when the watcher comes up.
 pub fn banner(device: &str, sources: &[&str], files: usize, routes: usize, ready_ms: u128) {
     let version = env!("CARGO_PKG_VERSION");
@@ -99,7 +111,7 @@ pub fn banner(device: &str, sources: &[&str], files: usize, routes: usize, ready
         "  {} Watching in {}  {}",
         "✓".if_supports_color(Stderr, |t| t.green()),
         format!("{ready_ms}ms").if_supports_color(Stderr, |t| t.dimmed()),
-        "· Ctrl-C to stop".if_supports_color(Stderr, |t| t.dimmed()),
+        stop_hint().if_supports_color(Stderr, |t| t.dimmed()),
     );
     eprintln!();
 }
@@ -203,5 +215,18 @@ mod tests {
         assert_eq!(thousands(950), "950");
         assert_eq!(thousands(3_950), "3,950");
         assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn foreground_hint_uses_ctrl_c() {
+        assert_eq!(super::stop_hint_for(None), "· Ctrl-C to stop");
+    }
+
+    #[test]
+    fn background_hint_uses_stop_command() {
+        assert_eq!(
+            super::stop_hint_for(Some(std::ffi::OsStr::new("background"))),
+            "· khotan-observer stop to quit"
+        );
     }
 }

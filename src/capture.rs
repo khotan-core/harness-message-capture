@@ -355,7 +355,7 @@ mod tests {
             root: source_root,
         };
         let workspaces = WorkspaceIndex::from_candidates(vec![workspace]);
-        let captured = collect_new(&[source], &offsets, &workspaces, &[]);
+        let captured = collect_new(&[source], &offsets, &workspaces, &["customer".into()]);
 
         assert_eq!(captured.len(), 1);
         assert!(captured[0].route.is_some());
@@ -375,7 +375,7 @@ mod tests {
             }],
             &offsets,
             &workspaces,
-            &[],
+            &["customer".into()],
         );
         assert_eq!(blocked.len(), 1);
         assert!(!blocked[0].advance_unrouted);

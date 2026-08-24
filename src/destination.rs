@@ -34,48 +34,63 @@ impl RouteRef {
     }
 }
 
-/// True when this workspace may be captured. An empty allowlist permits every
-/// dest-bearing repository. Names match the directory leaf; absolute paths
-/// match the workspace or a parent of it.
+/// True when this workspace may be captured. An empty allowlist sends nothing.
+/// A short name matches the folder leaf or any leaf that starts with it, so
+/// `podium` matches `podium-automation`. Absolute paths match the workspace
+/// or a parent of it.
 pub fn workspace_allowed(workspace: &Path, allow: &[String]) -> bool {
+    let allow = nonempty_allow(allow);
     if allow.is_empty() {
-        return true;
+        return false;
     }
-    if matches_allow(workspace, allow) {
+    if matches_allow(workspace, &allow) {
         return true;
     }
     match primary_repo_for_worktree(workspace) {
-        Ok(Some(primary)) if primary != workspace => matches_allow(&primary, allow),
+        Ok(Some(primary)) if primary != workspace => matches_allow(&primary, &allow),
         _ => false,
     }
 }
 
-fn matches_allow(workspace: &Path, allow: &[String]) -> bool {
+fn nonempty_allow(allow: &[String]) -> Vec<&str> {
+    allow
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+fn matches_allow(workspace: &Path, allow: &[&str]) -> bool {
     allow.iter().any(|entry| {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            return false;
-        }
         let path = Path::new(entry);
         if path.is_absolute() {
             workspace == path || workspace.starts_with(path)
         } else {
             workspace
                 .file_name()
-                .is_some_and(|name| name == entry)
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name_matches(name, entry))
         }
     })
 }
 
+fn name_matches(leaf: &str, entry: &str) -> bool {
+    let leaf = leaf.to_ascii_lowercase();
+    let entry = entry.to_ascii_lowercase();
+    leaf == entry || leaf.starts_with(&entry)
+}
+
 /// True when a queued route still belongs on the allowlist.
 pub fn route_allowed(route: &RouteRef, allow: &[String]) -> bool {
-    if allow.is_empty() {
-        return true;
+    if nonempty_allow(allow).is_empty() {
+        return false;
     }
     if let Some(parent) = route.credential_path.parent() {
         return workspace_allowed(parent, allow);
     }
-    allow.iter().any(|entry| entry.trim() == route.label)
+    allow
+        .iter()
+        .any(|entry| name_matches(&route.label, entry.trim()))
 }
 
 /// Find the authoritative repo-local route for a resolved harness workspace.
@@ -372,7 +387,7 @@ mod tests {
         let two = temp_repo("two");
         write_env(&one, ENV_FILE, "https://same.example", "one", "org");
         write_env(&two, ENV_FILE, "https://same.example/", "two", "org");
-        let routes = discover_routes(&[one.clone(), two.clone()], &[]);
+        let routes = discover_routes(&[one.clone(), two.clone()], &["hmc-destination".into()]);
         assert_eq!(routes.len(), 1);
         let _ = fs::remove_dir_all(one);
         let _ = fs::remove_dir_all(two);
@@ -406,30 +421,34 @@ mod tests {
     }
 
     #[test]
-    fn empty_allowlist_permits_every_workspace() {
+    fn empty_allowlist_sends_nothing() {
         let repo = PathBuf::from("/Users/a/Developer/customer");
-        assert!(workspace_allowed(&repo, &[]));
-    }
-
-    #[test]
-    fn blank_allow_entries_match_nothing() {
-        let repo = PathBuf::from("/Users/a/Developer/customer");
+        assert!(!workspace_allowed(&repo, &[]));
         assert!(!workspace_allowed(&repo, &["".into()]));
     }
 
     #[test]
-    fn allowlist_matches_leaf_name_or_absolute_path() {
-        let repo = PathBuf::from("/Users/a/Developer/customer");
-        assert!(workspace_allowed(&repo, &["customer".into()]));
+    fn allowlist_matches_prefix_or_absolute_path() {
+        let repo = PathBuf::from("/Users/a/Developer/podium-automation");
+        assert!(workspace_allowed(&repo, &["podium".into()]));
+        assert!(workspace_allowed(&repo, &["PODIUM".into()]));
         assert!(workspace_allowed(
             &repo,
-            &["/Users/a/Developer/customer".into()]
+            &["/Users/a/Developer/podium-automation".into()]
         ));
         assert!(workspace_allowed(&repo, &["/Users/a/Developer".into()]));
-        assert!(!workspace_allowed(&repo, &["other".into()]));
+        assert!(!workspace_allowed(&repo, &["chief".into()]));
         assert!(!workspace_allowed(
             &repo,
             &["/Users/a/Developer-extra".into()]
+        ));
+        assert!(workspace_allowed(
+            &PathBuf::from("/Users/a/Developer/chief-nutrition"),
+            &["chief".into()]
+        ));
+        assert!(workspace_allowed(
+            &PathBuf::from("/Users/a/Developer/dev-serve-robotics"),
+            &["dev-serve".into()]
         ));
     }
 
@@ -443,6 +462,6 @@ mod tests {
         );
         assert!(route_allowed(&route, &["customer".into()]));
         assert!(!route_allowed(&route, &["other".into()]));
-        assert!(route_allowed(&route, &[]));
+        assert!(!route_allowed(&route, &[]));
     }
 }

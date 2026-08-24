@@ -26,11 +26,10 @@ KHOTAN_OBSERVER_VERSION=v0.1.0 \
 ## Configure & run
 
 ```bash
-# Optional tuning. Customer destinations are discovered from repositories.
-# --allow-repo limits capture to named checkouts. Repeat the flag for more.
-khotan-observer configure --poll 45 --batch 200 --allow-repo customer-repo
+# Creates ~/.config/harness-message-capture/config.toml if it is missing.
+khotan-observer configure --poll 45 --batch 200
 
-# Foreground — live log, Ctrl-C to stop.
+# Foreground — live log. Ctrl-C stops the observer and returns to the shell.
 khotan-observer run
 
 # Or run as a persistent background LaunchAgent:
@@ -46,10 +45,12 @@ khotan-observer receive --token qa-token
 khotan-observer read --tool cursor --limit 20
 ```
 
-Only one observer can run at a time. `run`, `run-once`, and `start` use a
-process lock, so a foreground observer cannot overlap with the background
-LaunchAgent. The lock is released automatically if the process exits or
-crashes.
+Only one observer can run at a time. If a background LaunchAgent is loaded,
+then `run` stops it first. Ctrl-C then exits the observer and returns you
+to the shell. You do not need `khotan-observer stop` after a foreground
+session. `start` still uses `stop` because that process is not attached to
+a terminal. The process lock is released automatically if the process exits
+or crashes.
 
 `clear-queue --yes` only discards records waiting in the local delivery queue.
 It does not delete the original AI-tool transcripts or reset their offsets.
@@ -115,14 +116,17 @@ they are never copied into message records, queue metadata, or logs. Repositorie
 without a valid destination are skipped and their offsets advance, so adding a
 destination later does not retroactively upload old chats.
 
-A machine allowlist can narrow that further. When `allow_repos` is set in
-`~/.config/harness-message-capture/config.toml`, only those repository names
-or absolute paths are captured. Other dest-bearing workspaces are skipped and
-their offsets still advance. Leave the list empty to capture every repository
-that has a valid destination. `configure --allow-all` clears the list.
+Edit `allow_repos` in `~/.config/harness-message-capture/config.toml` to choose
+which repositories upload. The installer writes this file. A short name matches
+any folder that starts with it, so `podium` matches `podium-automation`. An empty
+list sends nothing. The next scan reads the file; you do not need to restart.
 
-```bash
-khotan-observer configure --allow-repo customer-one --allow-repo customer-two
+```toml
+allow_repos = [
+  "podium",
+  "chief",
+  "dev-serve",
+]
 ```
 
 Records already queued for a repo that is no longer allowed stay on disk until
@@ -201,6 +205,6 @@ installer always targets `releases/latest` unless `KHOTAN_OBSERVER_VERSION` is s
 
 This tool is intended for consented employee installs. Nothing is uploaded for
 a workspace unless its repository contains a complete, organization-verified
-Khotan destination. When a machine allowlist is set, the workspace must also
-match it. Secrets are scrubbed on-device before leaving the machine; see
-`src/redact.rs` for the pattern list.
+Khotan destination, and the workspace matches `allow_repos` in the machine
+config. An empty allow list sends nothing. Secrets are scrubbed on-device
+before leaving the machine; see `src/redact.rs` for the pattern list.

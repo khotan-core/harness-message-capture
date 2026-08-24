@@ -106,19 +106,26 @@ fi
 
 echo "==> Installed: $BIN_PATH"
 
+CONFIG="${HOME}/.config/harness-message-capture/config.toml"
+if [[ ! -f "$CONFIG" ]]; then
+  echo "==> Writing $CONFIG"
+  "$BIN_PATH" configure
+fi
+echo "==> Allow list: $CONFIG"
+
 if [[ "$WAS_RUNNING" -eq 1 ]]; then
   echo "==> Restarting background observer"
   "$BIN_PATH" start
   echo ""
-  echo "Upgrade complete. Follow it with: khotan-observer logs"
+  echo "Upgrade complete. Edit allow_repos in $CONFIG"
+  echo "Follow it with: khotan-observer logs"
   echo ""
   exit 0
 fi
 
 echo ""
 echo "Next steps:"
-echo "  1. khotan-observer configure"
-echo "     (customer routes come from repo-local env.khotan.local files)"
+echo "  1. Edit allow_repos in $CONFIG"
 echo "  2. khotan-observer run          # foreground, live log"
 echo "     or: khotan-observer start    # background LaunchAgent"
 echo ""

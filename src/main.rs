@@ -57,8 +57,8 @@ fn print_help() {
         "khotan-observer — capture local AI coding-agent transcripts\n\
          \n\
          USAGE:\n\
-           khotan-observer configure [--poll <seconds>] [--batch <count>] [--search-root <path>] [--allow-repo <name>] [--allow-all]\n\
-           khotan-observer run          Capture in the foreground (Ctrl-C to stop)\n\
+           khotan-observer configure [--poll <seconds>] [--batch <count>] [--search-root <path>]\n\
+           khotan-observer run          Capture in the foreground (Ctrl-C stops and returns to the shell)\n\
            khotan-observer start        Install & start the background LaunchAgent\n\
            khotan-observer stop         Stop the background LaunchAgent\n\
            khotan-observer logs         Follow the background log\n\
@@ -76,16 +76,12 @@ struct ConfigureArgs {
     poll: Option<u64>,
     batch: Option<usize>,
     search_roots: Vec<PathBuf>,
-    allow_repos: Vec<String>,
-    allow_all: bool,
 }
 
 fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
     let mut poll = None;
     let mut batch = None;
     let mut search_roots = Vec::new();
-    let mut allow_repos = Vec::new();
-    let mut allow_all = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -104,27 +100,13 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
                 search_roots.push(PathBuf::from(value));
                 i += 2;
             }
-            "--allow-repo" => {
-                let value = args.get(i + 1).context("--allow-repo requires a name or path")?;
-                allow_repos.push(value.clone());
-                i += 2;
-            }
-            "--allow-all" => {
-                allow_all = true;
-                i += 1;
-            }
             other => anyhow::bail!("unknown flag: {other}"),
         }
-    }
-    if allow_all && !allow_repos.is_empty() {
-        anyhow::bail!("use --allow-repo or --allow-all, not both");
     }
     Ok(ConfigureArgs {
         poll,
         batch,
         search_roots,
-        allow_repos,
-        allow_all,
     })
 }
 
@@ -140,20 +122,12 @@ fn configure(args: &[String]) -> Result<()> {
     if !parsed.search_roots.is_empty() {
         cfg.search_roots = parsed.search_roots;
     }
-    if parsed.allow_all {
-        cfg.allow_repos.clear();
-    } else if !parsed.allow_repos.is_empty() {
-        let mut allow = parsed.allow_repos;
-        allow.sort();
-        allow.dedup();
-        cfg.allow_repos = allow;
-    }
     cfg.endpoint = None;
     cfg.token = None;
     cfg.save()?;
     println!("configured. device_id={}", cfg.device_id);
     println!("config: {}", config::config_path().display());
-    println!("next: `khotan-observer run` (foreground) or `khotan-observer start` (background)");
+    println!("edit allow_repos in that file to choose which repositories upload");
     Ok(())
 }
 
@@ -180,8 +154,9 @@ fn status() -> Result<()> {
     for root in &cfg.search_roots {
         println!("  {}", root.display());
     }
+    println!("config    : {}", config::config_path().display());
     if cfg.allow_repos.is_empty() {
-        println!("allow     : all destination repositories");
+        println!("allow     : none — edit allow_repos in the config file");
     } else {
         println!("allow     :");
         for name in &cfg.allow_repos {
@@ -234,10 +209,30 @@ fn run_once() -> Result<()> {
 /// How long the loop may sit quiet before printing proof-of-life.
 const IDLE_HEARTBEAT: Duration = Duration::from_secs(300);
 
+fn acquire_foreground_lock() -> Result<singleton::ObserverLock> {
+    let released = agent::release_for_foreground()?;
+    if !released {
+        return singleton::acquire();
+    }
+    // launchd needs a moment to exit the previous `run` and drop the lock.
+    const ATTEMPTS: u32 = 20;
+    let mut last = None;
+    for _ in 0..ATTEMPTS {
+        match singleton::acquire() {
+            Ok(lock) => return Ok(lock),
+            Err(error) => {
+                last = Some(error);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    Err(last.expect("lock retry always records an error"))
+}
+
 fn watch() -> Result<()> {
-    let _lock = singleton::acquire()?;
+    let _lock = acquire_foreground_lock()?;
     let started = std::time::Instant::now();
-    let cfg = Config::load()?;
+    let mut cfg = Config::load()?;
     let srcs = sources::discover();
     let mut offsets = Offsets::load();
     let spool = Spool::open();
@@ -272,6 +267,9 @@ fn watch() -> Result<()> {
 
     let mut last_output = std::time::Instant::now();
     loop {
+        if let Ok(next) = Config::load() {
+            cfg = next;
+        }
         match rx.recv_timeout(Duration::from_secs(cfg.poll_secs)) {
             Ok(_evt) => {
                 // Debounce a burst of writes, then coalesce into one scan.
@@ -606,8 +604,6 @@ mod tests {
         assert_eq!(parsed.poll, None);
         assert_eq!(parsed.batch, None);
         assert!(parsed.search_roots.is_empty());
-        assert!(parsed.allow_repos.is_empty());
-        assert!(!parsed.allow_all);
     }
 
     #[test]
@@ -619,30 +615,11 @@ mod tests {
             "50",
             "--search-root",
             "/work/customers",
-            "--allow-repo",
-            "customer",
-            "--allow-repo",
-            "other",
         ]))
         .unwrap();
         assert_eq!(parsed.poll, Some(10));
         assert_eq!(parsed.batch, Some(50));
         assert_eq!(parsed.search_roots, vec![PathBuf::from("/work/customers")]);
-        assert_eq!(parsed.allow_repos, vec!["customer", "other"]);
-        assert!(!parsed.allow_all);
-    }
-
-    #[test]
-    fn parse_configure_allow_all_clears_list() {
-        let parsed = parse_configure_args(&s(&["--allow-all"])).unwrap();
-        assert!(parsed.allow_all);
-        assert!(parsed.allow_repos.is_empty());
-    }
-
-    #[test]
-    fn parse_configure_rejects_allow_repo_with_allow_all() {
-        let err = parse_configure_args(&s(&["--allow-all", "--allow-repo", "customer"])).unwrap_err();
-        assert!(err.to_string().contains("not both"));
     }
 
     #[test]

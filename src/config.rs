@@ -24,8 +24,8 @@ pub struct Config {
     /// Roots searched for customer repositories and worktrees.
     #[serde(default = "default_search_roots")]
     pub search_roots: Vec<PathBuf>,
-    /// When non-empty, only these repository names or absolute paths are
-    /// captured. Empty keeps today's behavior: every dest-bearing repo.
+    /// Repositories that may upload chats. Short names match any folder that
+    /// starts with the name. An empty list sends nothing.
     #[serde(default)]
     pub allow_repos: Vec<String>,
 }
@@ -69,9 +69,33 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let body = toml::to_string_pretty(self)?;
-        fs::write(&path, body)?;
+        fs::write(&path, self.render())?;
         Ok(())
+    }
+
+    /// Commented TOML so the allow list is obvious after install.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# khotan-observer machine config\n");
+        out.push_str("# Restart is not required. The next scan reads this file.\n\n");
+        out.push_str(&format!("device_id = {}\n", toml_quote(&self.device_id)));
+        out.push_str(&format!("poll_secs = {}\n", self.poll_secs));
+        out.push_str(&format!("batch = {}\n\n", self.batch));
+        out.push_str("search_roots = [\n");
+        for root in &self.search_roots {
+            out.push_str(&format!("    {},\n", toml_quote(&root.to_string_lossy())));
+        }
+        out.push_str("]\n\n");
+        out.push_str("# Repositories that may upload chats from this machine.\n");
+        out.push_str("# A short name matches any folder that starts with it.\n");
+        out.push_str("# \"podium\" matches podium-automation.\n");
+        out.push_str("# An empty list sends nothing.\n");
+        out.push_str("allow_repos = [\n");
+        for name in &self.allow_repos {
+            out.push_str(&format!("    {},\n", toml_quote(name)));
+        }
+        out.push_str("]\n");
+        out
     }
 
     pub fn fresh(device_id: String) -> Config {
@@ -107,6 +131,10 @@ pub fn state_dir() -> PathBuf {
 }
 
 /// Generate a 128-bit random hex id from the OS RNG, no external crate.
+fn toml_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 pub fn random_id() -> Result<String> {
     let mut buf = [0u8; 16];
     let mut f = fs::File::open("/dev/urandom").context("open /dev/urandom")?;
@@ -140,5 +168,25 @@ batch = 20
         let saved = toml::to_string(&cfg).unwrap();
         assert!(!saved.contains("old.example"));
         assert!(!saved.contains("old-secret"));
+    }
+
+    #[test]
+    fn render_round_trips_and_documents_the_allow_list() {
+        let cfg = Config {
+            endpoint: None,
+            token: None,
+            device_id: "abc".into(),
+            poll_secs: 45,
+            batch: 200,
+            search_roots: vec![PathBuf::from("/tmp/work")],
+            allow_repos: vec!["podium".into(), "chief".into()],
+        };
+        let body = cfg.render();
+        assert!(body.contains("An empty list sends nothing."));
+        assert!(body.contains("\"podium\""));
+        let parsed: Config = toml::from_str(&body).unwrap();
+        assert_eq!(parsed.device_id, "abc");
+        assert_eq!(parsed.allow_repos, vec!["podium", "chief"]);
+        assert_eq!(parsed.search_roots, vec![PathBuf::from("/tmp/work")]);
     }
 }

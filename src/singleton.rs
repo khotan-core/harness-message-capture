@@ -32,7 +32,7 @@ fn acquire_at(path: &Path) -> Result<ObserverLock> {
 
     file.try_lock_exclusive().map_err(|e| {
         anyhow::anyhow!(
-            "another khotan-observer is already running; stop it before starting a second observer ({e})"
+            "another khotan-observer is already running in a different terminal; press Ctrl-C there to stop it ({e})"
         )
     })?;
 

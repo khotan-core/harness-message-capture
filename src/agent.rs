@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const LABEL: &str = "com.khotan.observer";
+pub const BACKGROUND_MODE_ENV: &str = "KHOTAN_OBSERVER_MODE";
+const BACKGROUND_MODE: &str = "background";
 
 fn plist_path() -> PathBuf {
     home()
@@ -33,6 +35,11 @@ fn plist_contents(exe: &str, log: &str) -> String {
         <string>{exe}</string>
         <string>run</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>{BACKGROUND_MODE_ENV}</key>
+        <string>{BACKGROUND_MODE}</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -79,7 +86,7 @@ pub fn start() -> Result<()> {
     // Only unload when something is actually loaded; unloading a label that
     // isn't registered makes launchctl print a confusing I/O error.
     if already_loaded {
-        let _ = Command::new("launchctl").arg("unload").arg(&plist).output();
+        let _ = unload_loaded(&plist);
     }
     let out = Command::new("launchctl")
         .arg("load")
@@ -113,16 +120,31 @@ pub fn stop() -> Result<()> {
         );
         return Ok(());
     }
-    if !is_loaded() {
+    if !release_for_foreground()? {
         println!("background observer is already stopped");
         return Ok(());
     }
-    let _ = Command::new("launchctl")
+    println!("stopped background observer");
+    Ok(())
+}
+
+/// Unload a running LaunchAgent so a foreground `run` owns the machine.
+/// Returns true when an agent was loaded and unload was requested.
+pub fn release_for_foreground() -> Result<bool> {
+    let plist = plist_path();
+    if !plist.exists() || !is_loaded() {
+        return Ok(false);
+    }
+    unload_loaded(&plist)?;
+    Ok(true)
+}
+
+fn unload_loaded(plist: &std::path::Path) -> Result<()> {
+    Command::new("launchctl")
         .arg("unload")
-        .arg(&plist)
+        .arg(plist)
         .output()
         .context("run launchctl unload")?;
-    println!("stopped background observer");
     Ok(())
 }
 
@@ -166,4 +188,17 @@ pub fn is_loaded() -> bool {
 
 pub fn log_file() -> PathBuf {
     log_path()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_plist_marks_launchd_sessions() {
+        let body = plist_contents("/tmp/khotan-observer", "/tmp/log");
+        assert!(body.contains("KHOTAN_OBSERVER_MODE"));
+        assert!(body.contains("<string>background</string>"));
+        assert!(body.contains("/tmp/khotan-observer"));
+    }
 }
