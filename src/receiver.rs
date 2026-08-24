@@ -163,6 +163,9 @@ fn handle_connection(mut stream: TcpStream, opts: &ReceiveOpts) -> Result<()> {
         if store::sanitize_segment(&r.tool).is_err()
             || store::sanitize_segment(&r.project).is_err()
             || store::sanitize_segment(&r.session_id).is_err()
+            || r.thread_id
+                .as_deref()
+                .is_some_and(|thread| store::sanitize_segment(thread).is_err())
         {
             respond(
                 &mut stream,
@@ -307,6 +310,9 @@ mod tests {
             tool: "cursor".into(),
             project: "proj".into(),
             session_id: "s1".into(),
+            thread_id: None,
+            agent_role: None,
+            seq: None,
             captured_at_ms: 42,
             line: r#"{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}"#
                 .into(),

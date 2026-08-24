@@ -40,7 +40,7 @@ A push to `main` does not publish a binary. Only a `v*` tag does. Never leave `C
 | `src/destination.rs` | Load `env.khotan.local` / `.env.khotan.local` and verify org |
 | `src/capture.rs` | Tail new JSONL bytes; persist offsets |
 | `src/redact.rs` | Client-side secret scrub before spool |
-| `src/record.rs` | Generic captured-line schema |
+| `src/record.rs` | Generic captured-line schema (v2: `thread_id`, `agent_role`, `seq`) |
 | `src/spool.rs` | Per-route durable local queue |
 | `src/uploader.rs` | `GET /api/v1/me` then `POST /ingest` |
 | `src/agent.rs` | LaunchAgent install, start, stop, logs |
@@ -51,7 +51,7 @@ A push to `main` does not publish a binary. Only a `v*` tag does. Never leave `C
 | `src/log.rs` | Foreground and LaunchAgent log format |
 | `src/update.rs` | Compare this binary to the latest GitHub Release, warn on `run`, and replace `~/.local/bin` via `update` |
 
-Capture path: watch or poll `*.jsonl` → redact → require a complete repo-local destination → respect `allow_repos` → spool → upload. Workspaces without a valid destination are skipped and their offsets advance.
+Capture path: watch or poll `*.jsonl` → redact → require a complete repo-local destination → respect `allow_repos` → spool → upload. Workspaces without a valid destination are skipped and their offsets advance. Each record carries `thread_id` (the root chat), `agent_role` (`root` or `subagent`), and `seq` (byte offset in the source file).
 
 Transcript roots (only if the directory exists):
 

@@ -16,11 +16,12 @@ pub fn run(opts: ReadOpts) -> Result<()> {
         .with_context(|| format!("read inbox {}", opts.dir.display()))?;
     if records.is_empty() {
         println!(
-            "no records in {} (filters: tool={:?} project={:?} session={:?})",
+            "no records in {} (filters: tool={:?} project={:?} session={:?} thread={:?})",
             opts.dir.display(),
             opts.filter.tool,
             opts.filter.project,
-            opts.filter.session_id
+            opts.filter.session_id,
+            opts.filter.thread_id
         );
         return Ok(());
     }
@@ -37,28 +38,37 @@ pub fn run(opts: ReadOpts) -> Result<()> {
     );
     println!();
 
-    let mut last_session = String::new();
+    let mut last_thread = String::new();
     for r in &records {
-        let session_key = format!("{}/{}/{}", r.tool, r.project, r.session_id);
-        if session_key != last_session {
-            println!(
-                "── {} · {} · session {} ──",
-                r.tool, r.project, r.session_id
-            );
-            last_session = session_key;
+        let thread = r
+            .thread_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&r.session_id);
+        let thread_key = format!("{}/{}/{}", r.tool, r.project, thread);
+        if thread_key != last_thread {
+            println!("── {} · {} · thread {} ──", r.tool, r.project, thread);
+            last_thread = thread_key;
         }
+        let role_prefix = match r.agent_role.as_deref() {
+            Some("subagent") => format!("subagent {} ", r.session_id),
+            _ => String::new(),
+        };
         if opts.raw {
-            println!("[{}] {}", r.captured_at_ms, r.line);
+            println!("[{}] {role_prefix}{}", r.captured_at_ms, r.line);
             continue;
         }
         match extract_message(&r.line) {
             Some((role, text)) => {
                 let preview = truncate(&collapse_ws(&text), 400);
-                println!("  [{role}] {preview}");
+                println!("  {role_prefix}[{role}] {preview}");
             }
             None => {
                 let preview = truncate(&r.line, 240);
-                println!("  [raw {}/{}] {}", r.tool, r.session_id, preview);
+                println!(
+                    "  {role_prefix}[raw {}/{}] {}",
+                    r.tool, r.session_id, preview
+                );
             }
         }
     }
@@ -229,6 +239,9 @@ mod tests {
                 tool: "cursor".into(),
                 project: "p".into(),
                 session_id: "s".into(),
+                thread_id: None,
+                agent_role: None,
+                seq: None,
                 captured_at_ms: i,
                 line: format!(
                     r#"{{"role":"user","message":{{"content":[{{"type":"text","text":"m{i}"}}]}}}}"#

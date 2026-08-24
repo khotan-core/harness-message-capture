@@ -81,7 +81,7 @@ fn print_help() {
            khotan-observer version      Print this binary's release tag\n\
            khotan-observer run-once     Single scan + upload pass, then exit\n\
            khotan-observer receive      Local ingest server (writes to an inbox dir)\n\
-           khotan-observer read         Inspect messages stored in the inbox\n\
+           khotan-observer read         Inspect inbox messages (--thread, --session, --tool)\n\
            khotan-observer clear-queue --yes  Permanently discard queued records\n"
     );
 }
@@ -705,6 +705,7 @@ struct ReadArgs {
     tool: Option<String>,
     project: Option<String>,
     session: Option<String>,
+    thread: Option<String>,
     device: Option<String>,
     limit: usize,
     raw: bool,
@@ -715,6 +716,7 @@ fn parse_read_args(args: &[String]) -> Result<ReadArgs> {
     let mut tool = None;
     let mut project = None;
     let mut session = None;
+    let mut thread = None;
     let mut device = None;
     let mut limit = None;
     let mut raw = false;
@@ -735,6 +737,10 @@ fn parse_read_args(args: &[String]) -> Result<ReadArgs> {
             }
             "--session" => {
                 session = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--thread" => {
+                thread = args.get(i + 1).cloned();
                 i += 2;
             }
             "--device" => {
@@ -763,6 +769,7 @@ fn parse_read_args(args: &[String]) -> Result<ReadArgs> {
         tool,
         project,
         session,
+        thread,
         device,
         limit: limit.unwrap_or(50),
         raw,
@@ -778,6 +785,7 @@ fn read_cmd(args: &[String]) -> Result<()> {
             tool: parsed.tool,
             project: parsed.project,
             session_id: parsed.session,
+            thread_id: parsed.thread,
         },
         limit: parsed.limit,
         raw: parsed.raw,
@@ -991,6 +999,8 @@ mod tests {
             "cursor",
             "--session",
             "abc",
+            "--thread",
+            "thr",
             "--limit",
             "10",
             "--raw",
@@ -998,6 +1008,7 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.tool.as_deref(), Some("cursor"));
         assert_eq!(parsed.session.as_deref(), Some("abc"));
+        assert_eq!(parsed.thread.as_deref(), Some("thr"));
         assert_eq!(parsed.limit, 10);
         assert!(parsed.raw);
     }

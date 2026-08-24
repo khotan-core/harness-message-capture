@@ -251,6 +251,9 @@ mod tests {
             tool: "cursor".into(),
             project: "customer".into(),
             session_id: "session".into(),
+            thread_id: None,
+            agent_role: None,
+            seq: None,
             captured_at_ms: 1,
             line: line.into(),
         }

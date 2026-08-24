@@ -8,6 +8,9 @@ list, and that repo has a complete `env.khotan.local` or `.env.khotan.local`.
 
 Deliveries print in green. Warnings print in orange. Errors print in red.
 
+Each record names its root chat as `thread_id` and marks `agent_role` as
+`root` or `subagent`. `seq` is the byte offset of that line in the source file.
+
 Default `run` and `run-once` print only repositories on the allow list.
 Their captures, uploads, and failures still print. Skip lines for other
 folders stay off. To print every skip line, run `khotan-observer run --all-logs`.

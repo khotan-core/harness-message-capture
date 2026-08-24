@@ -177,12 +177,13 @@ The bundled receiver remains useful for inspecting the legacy batch shape:
    ```
 
    Default inbox: `~/.local/state/harness-message-capture/inbox/`
-   Layout: `{device_id}/{tool}/{project}/{session_id}.ndjson`
+   Layout: `{device_id}/{tool}/{project}/{thread_id}/{session_id}.ndjson`
 
 2. Inspect records already written to the inbox:
 
    ```bash
    khotan-observer read --tool cursor --limit 20
+   khotan-observer read --thread 76a56200-c845-4f62-b741-ca6237573ade
    khotan-observer read --raw --limit 5
    ```
 

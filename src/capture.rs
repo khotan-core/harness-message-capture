@@ -1,6 +1,6 @@
 use crate::config::state_dir;
 use crate::destination::{self, RouteRef};
-use crate::record::{now_ms, Record};
+use crate::record::{now_ms, Record, SCHEMA};
 use crate::redact;
 use crate::sources::{jsonl_files, Source};
 use crate::workspace::WorkspaceIndex;
@@ -133,12 +133,12 @@ fn read_file(
         .as_ref()
         .ok()
         .and_then(|path| path.as_deref());
-    let (project, session_id) = provenance(src.tool, file, &src.root, workspace);
+    let provenance = provenance(src.tool, file, &src.root, workspace);
     let (route, route_warning, advance_unrouted) = match workspace_result {
         Err(_) => (
             None,
             Some(RouteWarning::new(
-                &project,
+                &provenance.project,
                 "Same encoded path matches two checkouts",
             )),
             false,
@@ -147,7 +147,7 @@ fn read_file(
             let name = workspace
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| project.clone());
+                .unwrap_or_else(|| provenance.project.clone());
             (
                 None,
                 Some(RouteWarning::new(
@@ -162,7 +162,7 @@ fn read_file(
             Err(_) => (
                 None,
                 Some(RouteWarning::new(
-                    &project,
+                    &provenance.project,
                     "Repo found, dest file missing fields or conflicts",
                 )),
                 false,
@@ -170,26 +170,36 @@ fn read_file(
         },
         Ok(None) => (
             None,
-            Some(RouteWarning::new(&project, "Chat has no project folder")),
+            Some(RouteWarning::new(
+                &provenance.project,
+                "Chat has no project folder",
+            )),
             true,
         ),
     };
     let mut records = Vec::new();
     let complete = &buf[..=last_nl];
-    for raw in complete.split(|&b| b == b'\n') {
-        if raw.is_empty() {
-            continue;
+    let mut cursor = 0usize;
+    while cursor < complete.len() {
+        let rest = &complete[cursor..];
+        let line_end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+        let raw = &rest[..line_end];
+        if !raw.is_empty() {
+            let line = String::from_utf8_lossy(raw);
+            let scrubbed = redact::scrub(&line);
+            records.push(Record {
+                schema: SCHEMA.to_string(),
+                tool: src.tool.to_string(),
+                project: provenance.project.clone(),
+                session_id: provenance.session_id.clone(),
+                thread_id: Some(provenance.thread_id.clone()),
+                agent_role: Some(provenance.agent_role.clone()),
+                seq: Some(offset + cursor as u64),
+                captured_at_ms: now_ms(),
+                line: scrubbed,
+            });
         }
-        let line = String::from_utf8_lossy(raw);
-        let scrubbed = redact::scrub(&line);
-        records.push(Record {
-            schema: "v1".to_string(),
-            tool: src.tool.to_string(),
-            project: project.clone(),
-            session_id: session_id.clone(),
-            captured_at_ms: now_ms(),
-            line: scrubbed,
-        });
+        cursor += line_end + 1;
     }
 
     Ok(Some(CapturedFile {
@@ -202,12 +212,21 @@ fn read_file(
     }))
 }
 
-/// Derive a best-effort (project, session) pair from the transcript path.
-/// `project` is a human-readable workspace/thread label when we can recover one
-/// (e.g. `harness-message-capture` from Cursor's encoded project dir); `session`
-/// is the file stem (usually the chat/session id).
-fn provenance(tool: &str, file: &Path, root: &Path, workspace: Option<&Path>) -> (String, String) {
-    let session = file
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Provenance {
+    project: String,
+    session_id: String,
+    thread_id: String,
+    agent_role: String,
+}
+
+/// Derive project, session, and thread from the transcript path.
+/// `project` is a human-readable workspace label when we can recover one
+/// (e.g. `harness-message-capture` from Cursor's encoded project dir).
+/// `session_id` is the file stem. `thread_id` is the root session, so a
+/// subagent inherits its parent.
+fn provenance(tool: &str, file: &Path, root: &Path, workspace: Option<&Path>) -> Provenance {
+    let session_id = file
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
@@ -222,7 +241,31 @@ fn provenance(tool: &str, file: &Path, root: &Path, workspace: Option<&Path>) ->
             .unwrap_or_else(|| "codex".to_string()),
         _ => parent_dir_name(file),
     };
-    (project, session)
+    let (thread_id, agent_role) = thread_of(file, root, &session_id);
+    Provenance {
+        project,
+        session_id,
+        thread_id,
+        agent_role,
+    }
+}
+
+/// If any path component below the tool root is `subagents`, the transcript
+/// is a subagent and its thread is the directory above `subagents`.
+fn thread_of(file: &Path, root: &Path, session_id: &str) -> (String, String) {
+    let Ok(rel) = file.strip_prefix(root) else {
+        return (session_id.to_string(), "root".to_string());
+    };
+    let components: Vec<_> = rel
+        .iter()
+        .map(|c| c.to_string_lossy().into_owned())
+        .collect();
+    if let Some(idx) = components.iter().position(|c| c == "subagents") {
+        if idx > 0 {
+            return (components[idx - 1].clone(), "subagent".to_string());
+        }
+    }
+    (session_id.to_string(), "root".to_string())
 }
 
 fn parent_dir_name(file: &Path) -> String {
@@ -318,9 +361,76 @@ mod tests {
             .join("agent-transcripts")
             .join("76a56200-c845-4f62-b741-ca6237573ade")
             .join("76a56200-c845-4f62-b741-ca6237573ade.jsonl");
-        let (project, session) = provenance("cursor", &file, &root, None);
-        assert_eq!(project, "harness-message-capture");
-        assert_eq!(session, "76a56200-c845-4f62-b741-ca6237573ade");
+        let got = provenance("cursor", &file, &root, None);
+        assert_eq!(got.project, "harness-message-capture");
+        assert_eq!(got.session_id, "76a56200-c845-4f62-b741-ca6237573ade");
+        assert_eq!(got.thread_id, "76a56200-c845-4f62-b741-ca6237573ade");
+        assert_eq!(got.agent_role, "root");
+    }
+
+    #[test]
+    fn thread_of_cursor_root() {
+        let root = PathBuf::from("/Users/adeep/.cursor/projects");
+        let file = root
+            .join("Users-adeep-Developer-harness-message-capture")
+            .join("agent-transcripts")
+            .join("76a56200-c845-4f62-b741-ca6237573ade")
+            .join("76a56200-c845-4f62-b741-ca6237573ade.jsonl");
+        let (thread, role) = thread_of(&file, &root, "76a56200-c845-4f62-b741-ca6237573ade");
+        assert_eq!(thread, "76a56200-c845-4f62-b741-ca6237573ade");
+        assert_eq!(role, "root");
+    }
+
+    #[test]
+    fn thread_of_cursor_subagent() {
+        let root = PathBuf::from("/Users/adeep/.cursor/projects");
+        let file = root
+            .join("Users-adeep-Developer-harness-message-capture")
+            .join("agent-transcripts")
+            .join("76a56200-c845-4f62-b741-ca6237573ade")
+            .join("subagents")
+            .join("470b9dee-3acb-421d-96e5-20a4aa2b3811.jsonl");
+        let (thread, role) = thread_of(&file, &root, "470b9dee-3acb-421d-96e5-20a4aa2b3811");
+        assert_eq!(thread, "76a56200-c845-4f62-b741-ca6237573ade");
+        assert_eq!(role, "subagent");
+    }
+
+    #[test]
+    fn thread_of_claude_root() {
+        let root = PathBuf::from("/Users/adeep/.claude/projects");
+        let file = root
+            .join("-Users-adeep-Developer-khotan")
+            .join("878fdf14-322f-4772-bf37-99daaf983ce2.jsonl");
+        let (thread, role) = thread_of(&file, &root, "878fdf14-322f-4772-bf37-99daaf983ce2");
+        assert_eq!(thread, "878fdf14-322f-4772-bf37-99daaf983ce2");
+        assert_eq!(role, "root");
+    }
+
+    #[test]
+    fn thread_of_claude_subagent() {
+        let root = PathBuf::from("/Users/adeep/.claude/projects");
+        let file = root
+            .join("-Users-adeep-Developer-khotan")
+            .join("878fdf14-322f-4772-bf37-99daaf983ce2")
+            .join("subagents")
+            .join("agent-a299bcb2ba0808226.jsonl");
+        let (thread, role) = thread_of(&file, &root, "agent-a299bcb2ba0808226");
+        assert_eq!(thread, "878fdf14-322f-4772-bf37-99daaf983ce2");
+        assert_eq!(role, "subagent");
+    }
+
+    #[test]
+    fn thread_of_codex_is_always_root() {
+        let root = PathBuf::from("/Users/adeep/.codex/sessions");
+        let file = root
+            .join("2026")
+            .join("08")
+            .join("23")
+            .join("rollout-2026-08-23T11-38-01-01a02c44-7e9c-7db3-a9f0-64c4f742c79c.jsonl");
+        let stem = "rollout-2026-08-23T11-38-01-01a02c44-7e9c-7db3-a9f0-64c4f742c79c";
+        let (thread, role) = thread_of(&file, &root, stem);
+        assert_eq!(thread, stem);
+        assert_eq!(role, "root");
     }
 
     #[test]
@@ -438,6 +548,101 @@ mod tests {
                 "Chat has no project folder"
             ))
         );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn seq_is_byte_offset_and_continues_after_partial_read() {
+        let temp = temp_dir("seq");
+        let workspace = temp.join("customer");
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        fs::write(
+            workspace.join("env.khotan.local"),
+            "KHOTAN_API_URL='https://customer.example'\nKHOTAN_API_KEY='fake-key'\nKHOTAN_ORG_ID='org-test'\n",
+        )
+        .unwrap();
+        let source_root = temp.join("cursor-projects");
+        let transcript = source_root
+            .join(encoded_path(&workspace, "cursor"))
+            .join("agent-transcripts")
+            .join("session")
+            .join("session.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let first = "{\"role\":\"user\"}\n";
+        fs::write(&transcript, first).unwrap();
+
+        let mut offsets = Offsets {
+            map: HashMap::new(),
+            path: temp.join("offsets.json"),
+        };
+        let source = Source {
+            tool: "cursor",
+            root: source_root.clone(),
+        };
+        let workspaces = WorkspaceIndex::from_candidates(vec![workspace]);
+        let first_pass = collect_new(
+            std::slice::from_ref(&source),
+            &offsets,
+            &workspaces,
+            &["customer".into()],
+        );
+        assert_eq!(first_pass.len(), 1);
+        assert_eq!(first_pass[0].records.len(), 1);
+        assert_eq!(first_pass[0].records[0].seq, Some(0));
+        assert_eq!(first_pass[0].records[0].schema, SCHEMA);
+        assert_eq!(
+            first_pass[0].records[0].thread_id.as_deref(),
+            Some("session")
+        );
+        assert_eq!(first_pass[0].records[0].agent_role.as_deref(), Some("root"));
+
+        offsets.set(first_pass[0].offset_key.clone(), first_pass[0].next_offset);
+        let second = "{\"role\":\"assistant\"}\n";
+        fs::write(&transcript, format!("{first}{second}")).unwrap();
+        let second_pass = collect_new(&[source], &offsets, &workspaces, &["customer".into()]);
+        assert_eq!(second_pass.len(), 1);
+        assert_eq!(second_pass[0].records.len(), 1);
+        assert_eq!(second_pass[0].records[0].seq, Some(first.len() as u64));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn identical_turn_ended_lines_keep_distinct_seq() {
+        let temp = temp_dir("turns");
+        let workspace = temp.join("customer");
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        fs::write(
+            workspace.join("env.khotan.local"),
+            "KHOTAN_API_URL='https://customer.example'\nKHOTAN_API_KEY='fake-key'\nKHOTAN_ORG_ID='org-test'\n",
+        )
+        .unwrap();
+        let source_root = temp.join("cursor-projects");
+        let transcript = source_root
+            .join(encoded_path(&workspace, "cursor"))
+            .join("agent-transcripts")
+            .join("session")
+            .join("session.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let line = r#"{"type":"turn_ended","status":"success"}"#;
+        fs::write(&transcript, format!("{line}\n{line}\n")).unwrap();
+        let offsets = Offsets {
+            map: HashMap::new(),
+            path: temp.join("offsets.json"),
+        };
+        let captured = collect_new(
+            &[Source {
+                tool: "cursor",
+                root: source_root,
+            }],
+            &offsets,
+            &WorkspaceIndex::from_candidates(vec![workspace]),
+            &["customer".into()],
+        );
+        assert_eq!(captured[0].records.len(), 2);
+        assert_eq!(captured[0].records[0].line, captured[0].records[1].line);
+        assert_ne!(captured[0].records[0].seq, captured[0].records[1].seq);
+        assert_eq!(captured[0].records[0].seq, Some(0));
+        assert_eq!(captured[0].records[1].seq, Some((line.len() + 1) as u64));
         let _ = fs::remove_dir_all(temp);
     }
 }

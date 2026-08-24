@@ -16,6 +16,12 @@ pub struct StoredRecord {
     pub tool: String,
     pub project: String,
     pub session_id: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub agent_role: Option<String>,
+    #[serde(default)]
+    pub seq: Option<u64>,
     pub captured_at_ms: u128,
     pub line: String,
 }
@@ -29,15 +35,27 @@ impl StoredRecord {
             tool: sanitize_segment(&record.tool).context("invalid tool")?,
             project: sanitize_segment(&record.project).context("invalid project")?,
             session_id: sanitize_segment(&record.session_id).context("invalid session_id")?,
+            thread_id: match &record.thread_id {
+                Some(thread) => Some(sanitize_segment(thread).context("invalid thread_id")?),
+                None => None,
+            },
+            agent_role: record.agent_role.clone(),
+            seq: record.seq,
             captured_at_ms: record.captured_at_ms,
             line: record.line.clone(),
         })
     }
 
     pub fn path_under(&self, root: &Path) -> PathBuf {
+        let thread = self
+            .thread_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&self.session_id);
         root.join(&self.device_id)
             .join(&self.tool)
             .join(&self.project)
+            .join(thread)
             .join(format!("{}.ndjson", self.session_id))
     }
 }
@@ -53,6 +71,9 @@ pub fn content_key(device_id: &str, record: &Record) -> String {
     record.project.hash(&mut h);
     record.session_id.hash(&mut h);
     record.line.hash(&mut h);
+    if let Some(seq) = record.seq {
+        seq.hash(&mut h);
+    }
     format!("{:016x}", h.finish())
 }
 
@@ -163,6 +184,7 @@ pub struct ReadFilter {
     pub tool: Option<String>,
     pub project: Option<String>,
     pub session_id: Option<String>,
+    pub thread_id: Option<String>,
 }
 
 /// Walk the inbox and return stored records matching the filter, oldest first.
@@ -187,7 +209,7 @@ pub fn list_records(root: &Path, filter: &ReadFilter) -> Result<Vec<StoredRecord
             }
         }
     });
-    out.sort_by_key(|r| r.captured_at_ms);
+    out.sort_by_key(|r| (r.captured_at_ms, r.seq.unwrap_or(0)));
     Ok(out)
 }
 
@@ -209,6 +231,11 @@ fn matches_filter(r: &StoredRecord, f: &ReadFilter) -> bool {
     }
     if let Some(ref s) = f.session_id {
         if &r.session_id != s {
+            return false;
+        }
+    }
+    if let Some(ref t) = f.thread_id {
+        if r.thread_id.as_ref() != Some(t) {
             return false;
         }
     }
@@ -256,6 +283,9 @@ mod tests {
             tool: "cursor".into(),
             project: "my-project".into(),
             session_id: "sess-1".into(),
+            thread_id: None,
+            agent_role: None,
+            seq: None,
             captured_at_ms: 1,
             line: line.into(),
         }
@@ -310,6 +340,77 @@ mod tests {
         .unwrap();
         assert_eq!(only_cursor.len(), 1);
         assert_eq!(only_cursor[0].tool, "cursor");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn identical_lines_at_different_seq_keep_both_rows() {
+        let root = tmp();
+        let line = r#"{"type":"turn_ended","status":"success"}"#;
+        let mut a = sample(line);
+        a.seq = Some(0);
+        let mut b = sample(line);
+        b.seq = Some(40);
+        assert_ne!(content_key("dev1", &a), content_key("dev1", &b));
+        let (written, skipped) = append_batch(&root, "dev1", &[a, b]).unwrap();
+        assert_eq!((written, skipped), (2, 0));
+        let listed = list_records(&root, &ReadFilter::default()).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].seq, Some(0));
+        assert_eq!(listed[1].seq, Some(40));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v1_content_key_ignores_absent_seq() {
+        let mut with_none = sample("same");
+        with_none.seq = None;
+        let mut also_none = sample("same");
+        also_none.seq = None;
+        assert_eq!(
+            content_key("dev1", &with_none),
+            content_key("dev1", &also_none)
+        );
+        let mut with_zero = sample("same");
+        with_zero.seq = Some(0);
+        assert_ne!(
+            content_key("dev1", &with_none),
+            content_key("dev1", &with_zero)
+        );
+    }
+
+    #[test]
+    fn subagent_record_nests_under_thread() {
+        let root = tmp();
+        let rec = Record {
+            schema: "v2".into(),
+            tool: "cursor".into(),
+            project: "my-project".into(),
+            session_id: "sub-1".into(),
+            thread_id: Some("thread-1".into()),
+            agent_role: Some("subagent".into()),
+            seq: Some(0),
+            captured_at_ms: 1,
+            line: r#"{"role":"assistant"}"#.into(),
+        };
+        append_batch(&root, "dev1", &[rec]).unwrap();
+        let path = root
+            .join("dev1")
+            .join("cursor")
+            .join("my-project")
+            .join("thread-1")
+            .join("sub-1.ndjson");
+        assert!(path.is_file(), "expected {}", path.display());
+        let listed = list_records(
+            &root,
+            &ReadFilter {
+                thread_id: Some("thread-1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].agent_role.as_deref(), Some("subagent"));
         let _ = fs::remove_dir_all(&root);
     }
 }
