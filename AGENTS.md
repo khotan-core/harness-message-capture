@@ -49,7 +49,7 @@ A push to `main` does not publish a binary. Only a `v*` tag does. Never leave `C
 | `src/receiver.rs` | Local proof sink |
 | `src/store.rs` / `src/reader.rs` | Inbox layout and local inspect |
 | `src/log.rs` | Foreground and LaunchAgent log format |
-| `src/update.rs` | Compare this binary to the latest GitHub Release and warn on `run` |
+| `src/update.rs` | Compare this binary to the latest GitHub Release, warn on `run`, and replace `~/.local/bin` via `update` |
 
 Capture path: watch or poll `*.jsonl` → redact → require a complete repo-local destination → respect `allow_repos` → spool → upload. Workspaces without a valid destination are skipped and their offsets advance.
 
@@ -96,7 +96,9 @@ Installed-binary workflow (user machine):
 khotan-observer configure                        # checkbox list; no TTY prints a hint and exits
 khotan-observer configure --allow-repo customer-repo   # scriptable, replaces the list
 khotan-observer run
+khotan-observer run --all-logs
 khotan-observer start
+khotan-observer update
 khotan-observer logs
 khotan-observer status
 khotan-observer stop
@@ -104,7 +106,7 @@ khotan-observer uninstall
 khotan-observer clear-queue --yes
 ```
 
-`run` is foreground. Ctrl-C stops the observer and returns to the shell. If a LaunchAgent is loaded, `run` stops it first. `start` still uses `stop` because that process is not attached to a terminal.
+`run` is foreground. Ctrl-C stops the observer and returns to the shell. If a LaunchAgent is loaded, `run` stops it first. `start` still uses `stop` because that process is not attached to a terminal. Default `run` prints only allow-list repos. `--all-logs` also prints skip lines.
 
 ## Development workflow
 

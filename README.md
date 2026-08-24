@@ -15,6 +15,7 @@ curl -fsSL https://raw.githubusercontent.com/khotan-core/harness-message-capture
 
 This downloads the matching macOS binary from [GitHub Releases](https://github.com/khotan-core/harness-message-capture/releases/latest),
 verifies its SHA-256 checksum, and installs it to `~/.local/bin/khotan-observer`.
+After that, `khotan-observer update` is the upgrade path.
 
 Pin a version:
 
@@ -22,6 +23,17 @@ Pin a version:
 KHOTAN_OBSERVER_VERSION=v0.1.0 \
   curl -fsSL https://raw.githubusercontent.com/khotan-core/harness-message-capture/main/dist/install.sh | bash
 ```
+
+## Update
+
+```bash
+khotan-observer update
+khotan-observer update --version v0.1.21
+```
+
+That downloads `releases/latest` (or the pinned tag), checks the SHA-256,
+replaces `~/.local/bin/khotan-observer` on a new inode, and restarts a
+running LaunchAgent. `install` is the same command.
 
 ## Choose repositories and run
 
@@ -38,8 +50,9 @@ khotan-observer configure
 # Same choice without a prompt, for scripts and machines with no terminal.
 khotan-observer configure --allow-repo podium-automation --allow-repo chief-nutrition
 
-# Foreground — live log. Ctrl-C stops the observer and returns to the shell.
+# Foreground — live log of allowed repos. Ctrl-C stops and returns to the shell.
 khotan-observer run
+khotan-observer run --all-logs   # include skip lines for other repos
 
 # Or run as a persistent background LaunchAgent:
 khotan-observer start
@@ -82,8 +95,12 @@ Running in the foreground shows what it's doing:
 If GitHub has a newer tagged release, `run` prints a bright-red `ALERT`
 after the banner. Capture still starts.
 
-Each workspace prints on its own line. Counts on that line belong to that
-folder only:
+Default `run` prints only repositories on the allow list. Failures for those
+repos still print. Skip lines for other folders stay off unless you pass
+`--all-logs`.
+
+Each allowed workspace prints on its own line. Counts on that line belong to
+that folder only:
 
 ```
   16:30:09   harness-message-capture   captured 10   uploaded 10

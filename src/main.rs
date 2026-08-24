@@ -39,17 +39,22 @@ fn run() -> Result<()> {
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "configure" => configure(&args[2..]),
-        "run" => watch(),
+        "run" => watch(&args[2..]),
         "start" => agent::start(),
         "stop" => agent::stop(),
         "uninstall" => agent::uninstall(),
         "logs" => agent::logs(!args.iter().any(|a| a == "--no-follow")),
-        "run-once" => run_once(),
+        "run-once" => run_once(&args[2..]),
         "status" => status(),
         "receive" => receive_cmd(&args[2..]),
         "read" => read_cmd(&args[2..]),
         "clear-queue" => clear_queue(&args[2..]),
         "docs" => docs_cmd(&args[2..]),
+        "update" | "install" => update::run(&args[2..]),
+        "version" => {
+            update::print_version();
+            Ok(())
+        }
         _ => {
             print_help();
             Ok(())
@@ -64,13 +69,16 @@ fn print_help() {
          USAGE:\n\
            khotan-observer configure    Pick the repositories to observe from a checkbox list\n\
            khotan-observer configure --allow-repo <folder> [...]   Same choice, without a prompt\n\
-           khotan-observer run          Capture in the foreground (Ctrl-C stops and returns to the shell)\n\
+           khotan-observer run          Capture in the foreground (allowed repos only)\n\
+           khotan-observer run --all-logs   Same, and print skip lines for other repos\n\
            khotan-observer start        Install & start the background LaunchAgent\n\
            khotan-observer stop         Stop the background LaunchAgent\n\
            khotan-observer logs         Follow the background log\n\
+           khotan-observer update       Replace ~/.local/bin/khotan-observer with the latest GitHub Release\n\
            khotan-observer uninstall    Stop & remove the LaunchAgent\n\
            khotan-observer status       Show config, sources, and spool state\n\
            khotan-observer docs         What status and log lines mean\n\
+           khotan-observer version      Print this binary's release tag\n\
            khotan-observer run-once     Single scan + upload pass, then exit\n\
            khotan-observer receive      Local ingest server (writes to an inbox dir)\n\
            khotan-observer read         Inspect messages stored in the inbox\n\
@@ -107,6 +115,22 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
         }
     }
     Ok(ConfigureArgs { allow_repos })
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RunArgs {
+    all_logs: bool,
+}
+
+fn parse_run_args(args: &[String]) -> Result<RunArgs> {
+    let mut parsed = RunArgs::default();
+    for arg in args {
+        match arg.as_str() {
+            "--all-logs" => parsed.all_logs = true,
+            other => anyhow::bail!("unknown flag: {other}"),
+        }
+    }
+    Ok(parsed)
 }
 
 fn configure(args: &[String]) -> Result<()> {
@@ -330,14 +354,15 @@ fn status() -> Result<()> {
 }
 
 /// Single pass: capture new lines, spool them, drain the spool. Handy for tests.
-fn run_once() -> Result<()> {
+fn run_once(args: &[String]) -> Result<()> {
+    let parsed = parse_run_args(args)?;
     let _lock = singleton::acquire()?;
     let cfg = Config::load()?;
     let srcs = sources::discover();
     let mut offsets = Offsets::load();
     let spool = Spool::open();
     let pass = scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
-    if !report(pass) {
+    if !report(pass, &cfg.allow_repos, parsed.all_logs) {
         log::idle(offsets.len(), spool.pending());
     }
     Ok(())
@@ -366,7 +391,8 @@ fn acquire_foreground_lock() -> Result<singleton::ObserverLock> {
     Err(last.expect("lock retry always records an error"))
 }
 
-fn watch() -> Result<()> {
+fn watch(args: &[String]) -> Result<()> {
+    let parsed = parse_run_args(args)?;
     let _lock = acquire_foreground_lock()?;
     let started = std::time::Instant::now();
     let mut cfg = Config::load()?;
@@ -400,7 +426,11 @@ fn watch() -> Result<()> {
     update::warn_if_stale();
 
     // Catch up on anything appended while we were stopped.
-    report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool));
+    report(
+        scan_and_ship(&cfg, &srcs, &mut offsets, &spool),
+        &cfg.allow_repos,
+        parsed.all_logs,
+    );
 
     let mut last_output = std::time::Instant::now();
     loop {
@@ -412,13 +442,21 @@ fn watch() -> Result<()> {
                 // Debounce a burst of writes, then coalesce into one scan.
                 std::thread::sleep(Duration::from_millis(300));
                 while rx.try_recv().is_ok() {}
-                if report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool)) {
+                if report(
+                    scan_and_ship(&cfg, &srcs, &mut offsets, &spool),
+                    &cfg.allow_repos,
+                    parsed.all_logs,
+                ) {
                     last_output = std::time::Instant::now();
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Fallback pass: covers missed events and retries the spool.
-                if report(scan_and_ship(&cfg, &srcs, &mut offsets, &spool)) {
+                if report(
+                    scan_and_ship(&cfg, &srcs, &mut offsets, &spool),
+                    &cfg.allow_repos,
+                    parsed.all_logs,
+                ) {
                     last_output = std::time::Instant::now();
                 }
             }
@@ -448,11 +486,12 @@ fn repo_entry<'a>(
 }
 
 /// Print one line per workspace that did something. Returns whether it printed.
-fn report(pass: Pass) -> bool {
-    if pass.lines.is_empty() {
+fn report(pass: Pass, allow: &[String], all_logs: bool) -> bool {
+    let lines = log::for_display(pass.lines, allow, all_logs);
+    if lines.is_empty() {
         return false;
     }
-    log::activities(&pass.lines);
+    log::activities(&lines);
     true
 }
 
@@ -799,6 +838,28 @@ mod tests {
     #[test]
     fn parse_configure_rejects_unknown_flag() {
         let err = parse_configure_args(&s(&["--nope"])).unwrap_err();
+        assert!(err.to_string().contains("unknown flag"));
+    }
+
+    #[test]
+    fn parse_run_defaults_to_allowed_repos_only() {
+        assert_eq!(
+            parse_run_args(&s(&[])).unwrap(),
+            RunArgs { all_logs: false }
+        );
+    }
+
+    #[test]
+    fn parse_run_all_logs() {
+        assert_eq!(
+            parse_run_args(&s(&["--all-logs"])).unwrap(),
+            RunArgs { all_logs: true }
+        );
+    }
+
+    #[test]
+    fn parse_run_rejects_unknown_flag() {
+        let err = parse_run_args(&s(&["--verbose"])).unwrap_err();
         assert!(err.to_string().contains("unknown flag"));
     }
 

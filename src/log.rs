@@ -1,6 +1,7 @@
 use crate::record::now_ms;
 use owo_colors::{OwoColorize, Stream::Stderr};
 use std::io::IsTerminal;
+use std::path::Path;
 use std::sync::OnceLock;
 
 static OFFSET: OnceLock<i64> = OnceLock::new();
@@ -343,6 +344,41 @@ fn tone_rank(tone: Tone) -> u8 {
 /// How many skip-only repos print in full before they fold into `+N more`.
 pub const MAX_SKIP_LINES: usize = 8;
 
+/// Drop skip lines for repos that are not on the allow list.
+/// `--all-logs` keeps every line. Observer and queue health always print.
+pub fn for_display(lines: Vec<Activity>, allow: &[String], all_logs: bool) -> Vec<Activity> {
+    if all_logs {
+        return lines;
+    }
+    lines
+        .into_iter()
+        .filter(|line| is_display_relevant(line, allow))
+        .collect()
+}
+
+fn is_display_relevant(line: &Activity, allow: &[String]) -> bool {
+    matches!(line.label.as_str(), "queue" | "observer")
+        || allow
+            .iter()
+            .any(|entry| allow_matches_label(entry, &line.label))
+}
+
+fn allow_matches_label(entry: &str, label: &str) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    let path = Path::new(entry);
+    let name = if path.is_absolute() {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(entry)
+    } else {
+        entry
+    };
+    name.eq_ignore_ascii_case(label)
+}
+
 /// Keep every capture, upload, queue, or error line. Fold extra skip-only
 /// lines so a first-time catch-up does not flood the log.
 pub fn fold_skips(lines: Vec<Activity>, max_skips: usize) -> Vec<Activity> {
@@ -534,6 +570,48 @@ mod tests {
             line.render(),
             "dev-serve-robotics   queued 188   (Host is up in DNS, port is closed)"
         );
+    }
+
+    #[test]
+    fn for_display_hides_skips_unless_all_logs() {
+        let mut allowed = super::Activity::new("dev-serve-robotics");
+        allowed.captured = 5;
+        allowed.uploaded = 5;
+        let mut dest_fail = super::Activity::new("dev-serve-robotics");
+        dest_fail.set_means(super::Tone::Warning, "Host is up in DNS, port is closed");
+        let mut health = super::Activity::new("observer");
+        health.set_means(super::Tone::Error, "Progress file did not write");
+        let lines = vec![
+            allowed.clone(),
+            dest_fail.clone(),
+            skip_line("harness-message-capture", 12),
+            skip_line("khotan-design", 40),
+            health.clone(),
+        ];
+        let quiet = super::for_display(lines.clone(), &["dev-serve-robotics".into()], false);
+        assert_eq!(
+            quiet
+                .iter()
+                .map(|line| line.label.as_str())
+                .collect::<Vec<_>>(),
+            ["dev-serve-robotics", "dev-serve-robotics", "observer"]
+        );
+        let noisy = super::for_display(lines, &["dev-serve-robotics".into()], true);
+        assert_eq!(noisy.len(), 5);
+    }
+
+    #[test]
+    fn for_display_matches_absolute_allow_entries_by_leaf() {
+        let mut allowed = super::Activity::new("dev-serve-robotics");
+        allowed.captured = 1;
+        let lines = vec![allowed, skip_line("khotan-design", 8)];
+        let quiet = super::for_display(
+            lines,
+            &["/Users/adeep/Developer/dev-serve-robotics".into()],
+            false,
+        );
+        assert_eq!(quiet.len(), 1);
+        assert_eq!(quiet[0].label, "dev-serve-robotics");
     }
 
     #[test]

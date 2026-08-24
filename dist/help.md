@@ -8,6 +8,10 @@ list, and that repo has a complete `env.khotan.local` or `.env.khotan.local`.
 
 Deliveries print in green. Warnings print in orange. Errors print in red.
 
+Default `run` and `run-once` print only repositories on the allow list.
+Their captures, uploads, and failures still print. Skip lines for other
+folders stay off. To print every skip line, run `khotan-observer run --all-logs`.
+
 ## Activity lines
 
 Each workspace prints on its own line. Counts on that line belong to that
@@ -99,6 +103,7 @@ It does not advance the offset.
 ```
 khotan-observer configure
 khotan-observer start
+khotan-observer update
 khotan-observer docs
 khotan-observer status
 ```

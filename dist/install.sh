@@ -12,6 +12,8 @@
 # After install:
 #   khotan-observer configure --allow-repo your-repo
 #   khotan-observer start
+# Later upgrades:
+#   khotan-observer update
 #
 # Note: a binary fetched via curl is NOT flagged with the macOS quarantine
 # attribute, so no Apple code-signing/notarization is required for it to run.
