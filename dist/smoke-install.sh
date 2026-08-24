@@ -42,7 +42,9 @@ sed \
   "$ROOT/dist/install.sh" > "$patched"
 chmod +x "$patched"
 
-KHOTAN_OBSERVER_BIN_DIR="$install_root/bin" bash "$patched"
+KHOTAN_OBSERVER_BIN_DIR="$install_root/bin" \
+KHOTAN_OBSERVER_SKIP_CONFIGURE=1 \
+  bash "$patched"
 
 [[ -x "$install_root/bin/khotan-observer" ]] || { echo "FAIL: binary not installed" >&2; exit 1; }
 "$install_root/bin/khotan-observer" 2>&1 | head -1 | grep -q "khotan-observer" \

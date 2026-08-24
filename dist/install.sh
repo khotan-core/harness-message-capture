@@ -10,8 +10,9 @@
 #   KHOTAN_OBSERVER_REPO=khotan-core/harness-message-capture
 #
 # After install:
-#   khotan-observer configure --allow-repo your-repo
-#   khotan-observer start
+#   khotan-observer configure
+#   khotan-observer run
+#   (OR khotan-observer start if you want it to run in the background)
 # Later upgrades:
 #   khotan-observer update
 #
@@ -110,9 +111,54 @@ echo "==> Installed: $BIN_PATH"
 "$BIN_PATH" docs --write >/dev/null || true
 
 CONFIG="${HOME}/.config/harness-message-capture/config.toml"
-if [[ ! -f "$CONFIG" ]]; then
-  echo "==> Writing $CONFIG"
-  "$BIN_PATH" configure
+
+print_configure_why() {
+  local prefix="${1:-}"
+  echo "${prefix}Select the repositories you want to track."
+  echo "${prefix}NOTHING that is not selected here will be tracked."
+  echo "${prefix}MESSAGES will NOT be sent for those repositories!"
+}
+
+print_next_steps() {
+  echo ""
+  echo "Next steps:"
+  echo ""
+  echo "1. Please run khotan-observer configure and select the repositories you want to track."
+  print_configure_why "   "
+  echo ""
+  echo "2. khotan-observer run"
+  echo "   (OR khotan-observer start if you want it to run in the background)"
+  echo ""
+}
+
+allow_list_empty() {
+  if [[ ! -f "$CONFIG" ]]; then
+    return 0
+  fi
+  "$BIN_PATH" status 2>/dev/null | grep -q '^allow     : none'
+}
+
+open_configure() {
+  if [[ -t 0 ]]; then
+    "$BIN_PATH" configure
+  elif [[ -e /dev/tty ]]; then
+    "$BIN_PATH" configure < /dev/tty
+  else
+    "$BIN_PATH" configure
+  fi
+}
+
+if allow_list_empty; then
+  echo ""
+  echo "No repositories are selected yet."
+  print_configure_why
+  echo ""
+  if [[ "${KHOTAN_OBSERVER_SKIP_CONFIGURE:-}" == "1" ]]; then
+    echo "==> Skipping configure"
+  else
+    echo "==> Opening configure"
+    open_configure
+  fi
 fi
 echo "==> Allow list: $CONFIG"
 
@@ -120,14 +166,9 @@ if [[ "$WAS_RUNNING" -eq 1 ]]; then
   echo "==> Restarting background observer"
   "$BIN_PATH" start
   echo ""
-  echo "Upgrade complete. Select repos with: khotan-observer configure"
-  echo "Follow it with: khotan-observer logs"
-  echo ""
+  echo "Upgrade complete."
+  print_next_steps
   exit 0
 fi
 
-echo ""
-echo "Next steps:"
-echo "  1. khotan-observer configure"
-echo "  2. khotan-observer start"
-echo ""
+print_next_steps

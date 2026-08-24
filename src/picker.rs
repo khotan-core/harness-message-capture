@@ -192,6 +192,16 @@ impl State {
         )));
         frame.push_str(&line(&format!(
             "  {}",
+            "Select only the repos you want to track."
+                .if_supports_color(Stderr, |t| t.bold())
+        )));
+        frame.push_str(&line(&format!(
+            "  {}",
+            "NOTHING unselected is tracked. MESSAGES will NOT be sent for those repos."
+                .if_supports_color(Stderr, |t| t.yellow())
+        )));
+        frame.push_str(&line(&format!(
+            "  {}",
             dim("↑↓ move · space toggle · type to filter · enter save · esc cancel")
         )));
         frame.push_str(&line(""));
