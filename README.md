@@ -48,7 +48,11 @@ repositories may upload. A log glossary ships in the binary. Run
 khotan-observer configure
 
 # Same choice without a prompt, for scripts and machines with no terminal.
+# --allow-repo replaces the whole list.
 khotan-observer configure --allow-repo podium-automation --allow-repo chief-nutrition
+
+# Adjust the list without retyping it: --add-repo and --remove-repo keep the rest.
+khotan-observer configure --add-repo dev-serve-robotics --remove-repo old-checkout
 
 # Foreground — live log of allowed repos. Ctrl-C stops and returns to the shell.
 khotan-observer run
@@ -133,28 +137,42 @@ connection strings, common `password=` / `api_key=` assignments) before it is
 spooled and uploaded. The client stays dumb: it ships redacted raw lines; the
 server can parse per-tool semantics later.
 
-Only workspaces that resolve to a complete repo-local destination are captured:
+Only workspaces that resolve to a complete repo-local destination are captured.
+A destination is complete with two values — an origin and a key:
 
 ```dotenv
 KHOTAN_API_URL='https://customer.example'
 KHOTAN_API_KEY='organization-scoped-key'
-KHOTAN_ORG_ID='expected-organization-id'
+# KHOTAN_ORG_ID='expected-organization-id'   # optional, see below
 ```
 
-The observer checks `GET /api/v1/me` before delivery and fails closed unless
-the key's organization matches `KHOTAN_ORG_ID`. API keys are read at send time;
-they are never copied into message records, queue metadata, or logs. Repositories
-without a valid destination are skipped and their offsets advance, so adding a
-destination later does not retroactively upload old chats.
+The observer checks `GET /api/v1/me` before delivery and takes the key's
+organization from that call, stamping it on every batch and pinning it to the
+queue the first time it resolves. Once pinned — or when `KHOTAN_ORG_ID` is
+declared — a later disagreement blocks the route rather than delivering to the
+wrong organization. Declaring `KHOTAN_ORG_ID` is optional but keeps the stronger
+guarantee: a key pasted into the wrong repository is caught on the first upload,
+before any organization is pinned. API keys are read at send time; they are
+never copied into message records, queue metadata, or logs — a queue records
+only a non-reversible fingerprint of its key. Repositories without a valid
+destination are skipped and their offsets advance, so adding a destination later
+does not retroactively upload old chats.
 
 To choose which repositories upload, run `configure` and tick them in the list,
-or edit `allow_repos` in `~/.config/harness-message-capture/config.toml`. The
+or edit `allow_repos` in `~/.config/harness-message-capture/config.toml`. From
+a script, `--allow-repo` replaces the whole list, while `--add-repo` and
+`--remove-repo` change it one entry at a time and leave the rest alone. The
 list shows only repositories that already have a destination file, because no
 other repository can upload. A repository you allowed earlier stays on the list
 even after its destination file goes away, so saving never drops an entry
 silently. Each entry must be the exact folder name. `podium-automation` does not match
 `podium-automation-mirror`. An empty list sends nothing. The next scan reads
 the file; you do not need to restart.
+
+`status` lists the working customer routes, then any allowed repository whose
+destination file cannot upload — with the reason, so a half-filled file is not
+mistaken for one that was never set up — and flags allow-list entries that match
+no repository with a destination file.
 
 ```toml
 allow_repos = [
@@ -240,7 +258,8 @@ installer always targets `releases/latest` unless `KHOTAN_OBSERVER_VERSION` is s
 ## Privacy & consent
 
 This tool is intended for consented employee installs. Nothing is uploaded for
-a workspace unless its repository contains a complete, organization-verified
-Khotan destination, and the workspace matches `allow_repos` in the machine
-config. An empty allow list sends nothing. Secrets are scrubbed on-device
-before leaving the machine; see `src/redact.rs` for the pattern list.
+a workspace unless its repository contains a complete Khotan destination whose
+key the endpoint verifies before delivery, and the workspace matches
+`allow_repos` in the machine config. An empty allow list sends nothing. Secrets
+are scrubbed on-device before leaving the machine; see `src/redact.rs` for the
+pattern list.

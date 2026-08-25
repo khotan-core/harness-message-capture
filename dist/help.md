@@ -5,6 +5,10 @@ Install also writes a copy to `~/.local/share/khotan-observer/help.md`.
 
 Nothing leaves this machine unless the chat maps to a git repo on the allow
 list, and that repo has a complete `env.khotan.local` or `.env.khotan.local`.
+A destination file is complete with `KHOTAN_API_URL` and `KHOTAN_API_KEY`.
+`KHOTAN_ORG_ID` is optional: the organization is otherwise read from the key at
+send time. Declaring it keeps the stronger check that a key pasted into the
+wrong repository is caught on the first upload rather than after it resolves.
 
 Deliveries print in green. Warnings print in orange. Errors print in red.
 
@@ -84,13 +88,27 @@ It does not advance the offset.
 
 `podium-automation (DNS failed)` — orange. Retry later.
 
-`podium-automation (Server error or rate limit)` — orange. Retry later.
+`podium-automation (Server error or rate limit · ingest 503 · upstream timeout)`
+— orange. Retry later. Delivery lines carry the HTTP status and the first words
+of the server's own answer, so a refusal names its cause.
 
-`podium-automation (Key or request refused. Queue keeps the lines)` — red.
+`podium-automation (Key or request refused · ingest 401 · invalid key · queue
+keeps the lines)` — red.
 
-`podium-automation (Key's org does not match KHOTAN_ORG_ID)` — red.
+`podium-automation (One record was too big to send · ingest 413 · Body exceeded
+1mb limit)` — orange. Batches shrink themselves when a server refuses their
+size. A single line no batch size can carry moves to `quarantine/` so the rest
+of the queue keeps going.
 
-`podium-automation (Dest file gone or URL/org changed after queue)` — red.
+`podium-automation (Key resolves to a different org than this queue is bound to)`
+— red. The endpoint reported a different organization than the one declared in
+the destination file, or the one already pinned to this queue. The lines stay
+queued rather than going to the wrong organization.
+
+`podium-automation (Dest file gone and no repo with the same key was found)` —
+red. The file this queue was pinned to no longer produces a key, and no other
+allowed repository on the machine carries the same origin and key to deliver
+through instead.
 
 `podium-automation (The /api/v1/me body was not usable)` — red.
 

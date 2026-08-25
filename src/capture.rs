@@ -481,9 +481,11 @@ mod tests {
         assert!(captured[0].next_offset > 0);
 
         let workspace = workspaces.candidates()[0].clone();
+        // A destination file missing a required value (no API key) stays
+        // blocked, so the offset must not advance past lines it never queued.
         fs::write(
             workspace.join("env.khotan.local"),
-            "KHOTAN_API_URL='https://customer.example'\nKHOTAN_API_KEY='fake-key'\n",
+            "KHOTAN_API_URL='https://customer.example'\n",
         )
         .unwrap();
         let blocked = collect_new(

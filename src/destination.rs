@@ -11,8 +11,18 @@ const DOTTED_ENV_FILE: &str = ".env.khotan.local";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteRef {
     pub id: String,
-    pub org_id: String,
+    /// The organization this route is bound to: declared in the destination
+    /// file, or pinned into the queue the first time the endpoint named it.
+    /// Absent until either happens — the organization is no longer required to
+    /// enrol.
+    #[serde(default)]
+    pub org_id: Option<String>,
     pub api_url: String,
+    /// FNV-1a of the API key that reaches this origin. `None` only for a queue
+    /// written before this field existed; a route read from a file always has
+    /// one. It identifies a queue without the network and is not the key.
+    #[serde(default)]
+    pub key_fingerprint: Option<u64>,
     pub credential_path: PathBuf,
     pub label: String,
 }
@@ -23,15 +33,35 @@ pub struct Credentials {
 }
 
 impl RouteRef {
-    fn new(api_url: String, org_id: String, credential_path: PathBuf, label: String) -> RouteRef {
+    fn new(
+        api_url: String,
+        org_id: Option<String>,
+        api_key: &str,
+        credential_path: PathBuf,
+        label: String,
+    ) -> RouteRef {
+        let fingerprint = key_fingerprint(api_key);
         RouteRef {
-            id: stable_route_id(&api_url, &org_id),
+            id: stable_route_id(&api_url, fingerprint),
             org_id,
             api_url,
+            key_fingerprint: Some(fingerprint),
             credential_path,
             label,
         }
     }
+}
+
+/// FNV-1a of an API key. Not reversible to the key in any practical sense, and
+/// the key itself is never written beside it. One definition serves discovery,
+/// queue identity, and the upload path's verification cache.
+pub fn key_fingerprint(api_key: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in api_key.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// True when this workspace may be captured. An empty allowlist sends nothing.
@@ -126,7 +156,7 @@ fn diagnose(workspace: &Path) -> String {
         return "destination file is unreadable".to_string();
     };
     let parsed = parse_env(&body);
-    let missing: Vec<&str> = ["KHOTAN_API_URL", "KHOTAN_API_KEY", "KHOTAN_ORG_ID"]
+    let missing: Vec<&str> = ["KHOTAN_API_URL", "KHOTAN_API_KEY"]
         .into_iter()
         .filter(|key| {
             parsed
@@ -210,14 +240,17 @@ fn find_env_within_repo(start: &Path) -> Result<Option<PathBuf>> {
     }
 }
 
-/// A specified FNV-1a digest keeps queue directory names stable across Rust
-/// versions. Existing route metadata still makes collisions fail closed.
-fn stable_route_id(api_url: &str, org_id: &str) -> String {
+/// The name a *new* queue directory takes: origin plus a fingerprint of the
+/// key, never the organization, so an identity can be computed offline the
+/// moment a destination file is read. A specified FNV-1a digest keeps the name
+/// stable across Rust versions. Existing directories are matched by their
+/// recorded metadata, not by recomputing this, so their names never change.
+fn stable_route_id(api_url: &str, fingerprint: u64) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in api_url
         .bytes()
         .chain(std::iter::once(b'\n'))
-        .chain(org_id.bytes())
+        .chain(format!("{fingerprint:016x}").bytes())
     {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
@@ -261,26 +294,56 @@ fn load_route(path: &Path) -> Result<RouteRef> {
     let parsed =
         parse_env(&fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?);
     let api_url = required(&parsed, "KHOTAN_API_URL", path)?;
-    let _api_key = required(&parsed, "KHOTAN_API_KEY", path)?;
-    let org_id = required(&parsed, "KHOTAN_ORG_ID", path)?;
+    let api_key = required(&parsed, "KHOTAN_API_KEY", path)?;
+    let org_id = optional(&parsed, "KHOTAN_ORG_ID");
     let api_url = normalize_api_url(&api_url)?;
     let repo = path.parent().context("destination file has no parent")?;
     let label = repo
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "customer".to_string());
-    Ok(RouteRef::new(api_url, org_id, path.to_path_buf(), label))
+    Ok(RouteRef::new(
+        api_url,
+        org_id,
+        &api_key,
+        path.to_path_buf(),
+        label,
+    ))
 }
 
+/// The key that reaches a queue's origin. The organization is deliberately not
+/// checked here — it is resolved and enforced against the endpoint at send time,
+/// and the key may have been rotated to a new one for the same customer. Only
+/// the origin must still agree, so a file repurposed to a different customer
+/// stops serving this queue rather than delivering its records to the wrong one.
 pub fn read_credentials(route: &RouteRef) -> Result<Credentials> {
-    let current = load_route(&route.credential_path)?;
-    if current.api_url != route.api_url || current.org_id != route.org_id {
-        bail!("destination identity changed since records were queued")
+    let parsed = parse_env(
+        &fs::read_to_string(&route.credential_path)
+            .with_context(|| format!("read {}", route.credential_path.display()))?,
+    );
+    let api_url = normalize_api_url(&required(
+        &parsed,
+        "KHOTAN_API_URL",
+        &route.credential_path,
+    )?)?;
+    if api_url != route.api_url {
+        bail!("destination origin changed since records were queued")
     }
-    let parsed = parse_env(&fs::read_to_string(&route.credential_path)?);
     Ok(Credentials {
         api_key: required(&parsed, "KHOTAN_API_KEY", &route.credential_path)?,
     })
+}
+
+/// True when two routes name the same destination: same origin, same key. Used
+/// to re-point a queue at a live file when the one it was pinned to stops
+/// producing credentials. Identity cannot be confirmed without both
+/// fingerprints, so a legacy queue that never recorded one does not match.
+pub fn same_identity(a: &RouteRef, b: &RouteRef) -> bool {
+    a.api_url == b.api_url
+        && matches!(
+            (a.key_fingerprint, b.key_fingerprint),
+            (Some(x), Some(y)) if x == y
+        )
 }
 
 fn required(map: &BTreeMap<String, String>, key: &str, path: &Path) -> Result<String> {
@@ -289,6 +352,16 @@ fn required(map: &BTreeMap<String, String>, key: &str, path: &Path) -> Result<St
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .with_context(|| format!("{key} is missing in {}", path.display()))
+}
+
+/// A value that may be absent or blank. An empty declaration is the same as
+/// none — the field is optional now, and a leftover `KHOTAN_ORG_ID=` says
+/// nothing about the organization.
+fn optional(map: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    map.get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 pub fn normalize_api_url(raw: &str) -> Result<String> {
@@ -346,7 +419,7 @@ pub fn discover_routes(workspaces: &[PathBuf], allow: &[String]) -> Vec<RouteRef
             continue;
         }
         if let Ok(Some(route)) = resolve(workspace) {
-            if seen.insert((route.org_id.clone(), route.api_url.clone())) {
+            if seen.insert((route.api_url.clone(), route.key_fingerprint)) {
                 routes.push(route);
             }
         }
@@ -391,12 +464,47 @@ mod tests {
 
     #[test]
     fn route_ids_are_repeatable_and_urls_cannot_embed_secrets_or_paths() {
-        let first = stable_route_id("https://customer.example", "org-1");
-        let second = stable_route_id("https://customer.example", "org-1");
+        let fingerprint = key_fingerprint("some-api-key");
+        let first = stable_route_id("https://customer.example", fingerprint);
+        let second = stable_route_id("https://customer.example", fingerprint);
         assert_eq!(first, second);
         assert_eq!(first.len(), 16);
         assert!(normalize_api_url("https://user:secret@customer.example").is_err());
         assert!(normalize_api_url("https://customer.example/api").is_err());
+    }
+
+    #[test]
+    fn identity_follows_the_key_not_the_organization() {
+        let repo = temp_repo("identity");
+        write_env(
+            &repo,
+            ENV_FILE,
+            "https://customer.example",
+            "key-one",
+            "org",
+        );
+        let one = resolve(&repo).unwrap().unwrap();
+        // Same origin, same declared org, a different key: a different queue.
+        write_env(
+            &repo,
+            ENV_FILE,
+            "https://customer.example",
+            "key-two",
+            "org",
+        );
+        let two = resolve(&repo).unwrap().unwrap();
+        assert_ne!(one.id, two.id);
+        assert_ne!(one.key_fingerprint, two.key_fingerprint);
+        // The same key with no declared org still lands the same identity.
+        fs::write(
+            repo.join(ENV_FILE),
+            "KHOTAN_API_URL='https://customer.example'\nKHOTAN_API_KEY='key-one'\n",
+        )
+        .unwrap();
+        let undeclared = resolve(&repo).unwrap().unwrap();
+        assert_eq!(undeclared.id, one.id);
+        assert_eq!(undeclared.org_id, None);
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -416,7 +524,8 @@ mod tests {
         write_env(&repo, ENV_FILE, "https://customer.example/", "key", "org");
         let route = resolve(&repo).unwrap().unwrap();
         assert_eq!(route.api_url, "https://customer.example");
-        assert_eq!(route.org_id, "org");
+        assert_eq!(route.org_id.as_deref(), Some("org"));
+        assert!(route.key_fingerprint.is_some());
         assert!(!route.id.contains("key"));
         let _ = fs::remove_dir_all(repo);
     }
@@ -435,20 +544,50 @@ mod tests {
             "nested-org",
         );
         let route = resolve(&nested).unwrap().unwrap();
-        assert_eq!(route.org_id, "nested-org");
+        assert_eq!(route.org_id.as_deref(), Some("nested-org"));
         assert_eq!(route.credential_path, nested.join(ENV_FILE));
         let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
-    fn rejects_incomplete_destination() {
-        let repo = temp_repo("incomplete");
+    fn an_origin_and_a_key_are_enough_with_or_without_the_org() {
+        let repo = temp_repo("two-keys");
+        // Two keys: origin and API key, no organization.
         fs::write(
             repo.join(ENV_FILE),
             "KHOTAN_API_URL='https://customer.example'\nKHOTAN_API_KEY='key'\n",
         )
         .unwrap();
+        let route = resolve(&repo).unwrap().unwrap();
+        assert_eq!(route.org_id, None);
+        assert_eq!(readiness(&repo), Readiness::Ready);
+
+        // Three keys: the organization is accepted and carried when declared.
+        write_env(&repo, ENV_FILE, "https://customer.example", "key", "org");
+        assert_eq!(
+            resolve(&repo).unwrap().unwrap().org_id.as_deref(),
+            Some("org")
+        );
+        assert_eq!(readiness(&repo), Readiness::Ready);
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn a_file_missing_the_api_key_is_blocked_naming_it() {
+        let repo = temp_repo("no-key");
+        fs::write(
+            repo.join(ENV_FILE),
+            "KHOTAN_API_URL='https://customer.example'\nKHOTAN_ORG_ID='org'\n",
+        )
+        .unwrap();
         assert!(resolve(&repo).is_err());
+        match readiness(&repo) {
+            Readiness::Blocked(reason) => {
+                assert!(reason.contains("KHOTAN_API_KEY"), "{reason}");
+                assert!(!reason.contains("KHOTAN_ORG_ID"), "{reason}");
+            }
+            other => panic!("expected blocked, got {other:?}"),
+        }
         let _ = fs::remove_dir_all(repo);
     }
 
@@ -462,11 +601,19 @@ mod tests {
     }
 
     #[test]
-    fn deduplicates_mirrors_by_org_and_origin() {
+    fn deduplicates_mirrors_that_carry_the_same_origin_and_key() {
         let one = temp_repo("one");
         let two = temp_repo("two");
-        write_env(&one, ENV_FILE, "https://same.example", "one", "org");
-        write_env(&two, ENV_FILE, "https://same.example/", "two", "org");
+        // Identical origin and key: the same destination reached from two
+        // checkouts. The trailing slash and the declared org must not matter.
+        write_env(&one, ENV_FILE, "https://same.example", "shared-key", "org");
+        write_env(
+            &two,
+            ENV_FILE,
+            "https://same.example/",
+            "shared-key",
+            "other",
+        );
         let routes = discover_routes(
             &[one.clone(), two.clone()],
             &[
@@ -477,6 +624,29 @@ mod tests {
         assert_eq!(routes.len(), 1);
         let _ = fs::remove_dir_all(one);
         let _ = fs::remove_dir_all(two);
+    }
+
+    #[test]
+    fn two_origins_and_two_keys_on_one_origin_stay_separate() {
+        let a = temp_repo("origin-a");
+        let b = temp_repo("origin-b");
+        let c = temp_repo("origin-a-second-key");
+        // Two different origins.
+        write_env(&a, ENV_FILE, "https://a.example", "key-a", "org");
+        write_env(&b, ENV_FILE, "https://b.example", "key-a", "org");
+        // Same origin as `a`, a different key.
+        write_env(&c, ENV_FILE, "https://a.example", "key-c", "org");
+        let names: Vec<String> = [&a, &b, &c]
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let routes = discover_routes(&[a.clone(), b.clone(), c.clone()], &names);
+        assert_eq!(routes.len(), 3);
+        let ids: BTreeSet<&str> = routes.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids.len(), 3, "each origin/key pair is its own queue");
+        let _ = fs::remove_dir_all(a);
+        let _ = fs::remove_dir_all(b);
+        let _ = fs::remove_dir_all(c);
     }
 
     #[test]
@@ -500,7 +670,7 @@ mod tests {
         .unwrap();
 
         let route = resolve(&worktree).unwrap().unwrap();
-        assert_eq!(route.org_id, "org");
+        assert_eq!(route.org_id.as_deref(), Some("org"));
         assert_eq!(route.credential_path, repo.join(ENV_FILE));
         let _ = fs::remove_dir_all(worktree);
         let _ = fs::remove_dir_all(repo);
@@ -546,7 +716,8 @@ mod tests {
     fn route_allowlist_uses_credential_parent() {
         let route = RouteRef::new(
             "https://customer.example".into(),
-            "org".into(),
+            Some("org".into()),
+            "api-key",
             PathBuf::from("/Users/a/Developer/customer/env.khotan.local"),
             "customer".into(),
         );

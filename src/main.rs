@@ -68,7 +68,9 @@ fn print_help() {
          \n\
          USAGE:\n\
            khotan-observer configure    Pick the repositories to observe from a checkbox list\n\
-           khotan-observer configure --allow-repo <folder> [...]   Same choice, without a prompt\n\
+           khotan-observer configure --allow-repo <folder> [...]   Replace the list, without a prompt\n\
+           khotan-observer configure --add-repo <folder> [...]     Add to the list, keeping the rest\n\
+           khotan-observer configure --remove-repo <folder> [...]  Drop from the list, keeping the rest\n\
            khotan-observer run          Capture in the foreground (allowed repos only)\n\
            khotan-observer run --all-logs   Same, and print skip lines for other repos\n\
            khotan-observer start        Install & start the background LaunchAgent\n\
@@ -86,24 +88,34 @@ fn print_help() {
     );
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct ConfigureArgs {
+    /// `--allow-repo`: replace the whole list, as it has always done.
     allow_repos: Option<Vec<String>>,
+    /// `--add-repo`: merge these into the stored list.
+    add_repos: Vec<String>,
+    /// `--remove-repo`: drop these from the stored list.
+    remove_repos: Vec<String>,
 }
 
 fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
-    let mut allow_repos = None;
+    let mut parsed = ConfigureArgs::default();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--allow-repo" => {
-                let value = args
-                    .get(i + 1)
-                    .context("--allow-repo requires a folder name")?;
-                if value.starts_with('-') || value.is_empty() {
-                    anyhow::bail!("--allow-repo requires a folder name");
-                }
-                allow_repos.get_or_insert_with(Vec::new).push(value.clone());
+                let value = value_after(args, i, "--allow-repo")?;
+                parsed.allow_repos.get_or_insert_with(Vec::new).push(value);
+                i += 2;
+            }
+            "--add-repo" => {
+                parsed.add_repos.push(value_after(args, i, "--add-repo")?);
+                i += 2;
+            }
+            "--remove-repo" => {
+                parsed
+                    .remove_repos
+                    .push(value_after(args, i, "--remove-repo")?);
                 i += 2;
             }
             "--poll" | "--batch" | "--search-root" => {
@@ -114,7 +126,66 @@ fn parse_configure_args(args: &[String]) -> Result<ConfigureArgs> {
             other => anyhow::bail!("unknown flag: {other}"),
         }
     }
-    Ok(ConfigureArgs { allow_repos })
+    if parsed.allow_repos.is_some()
+        && !(parsed.add_repos.is_empty() && parsed.remove_repos.is_empty())
+    {
+        anyhow::bail!(
+            "--allow-repo replaces the list; use --add-repo/--remove-repo to adjust it, not both"
+        );
+    }
+    Ok(parsed)
+}
+
+/// The folder name after a repo flag, rejecting a missing value or another flag.
+fn value_after(args: &[String], i: usize, flag: &str) -> Result<String> {
+    let value = args
+        .get(i + 1)
+        .with_context(|| format!("{flag} requires a folder name"))?;
+    if value.starts_with('-') || value.is_empty() {
+        anyhow::bail!("{flag} requires a folder name");
+    }
+    Ok(value.clone())
+}
+
+/// The allow list a non-interactive `configure` should store: the replacement
+/// as given, or the stored list with additions and removals folded in. `None`
+/// means no list flags were passed, so the checkbox picker decides.
+fn next_allow_repos(existing: &[String], parsed: &ConfigureArgs) -> Option<Vec<String>> {
+    if let Some(replacement) = &parsed.allow_repos {
+        return Some(replacement.clone());
+    }
+    if !parsed.add_repos.is_empty() || !parsed.remove_repos.is_empty() {
+        return Some(merge_allow(
+            existing,
+            &parsed.add_repos,
+            &parsed.remove_repos,
+        ));
+    }
+    None
+}
+
+/// Fold `--add-repo`/`--remove-repo` into the stored list. Removals win over
+/// the current list, then additions land unless already present. An add of an
+/// entry already there, or a remove of one that is absent, changes nothing.
+fn merge_allow(existing: &[String], add: &[String], remove: &[String]) -> Vec<String> {
+    let norm = |value: &str| value.trim().to_ascii_lowercase();
+    let dropped: std::collections::BTreeSet<String> = remove.iter().map(|e| norm(e)).collect();
+    let mut result: Vec<String> = existing
+        .iter()
+        .filter(|entry| !entry.trim().is_empty())
+        .filter(|entry| !dropped.contains(&norm(entry)))
+        .cloned()
+        .collect();
+    for entry in add {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !result.iter().any(|kept| norm(kept) == norm(trimmed)) {
+            result.push(trimmed.to_string());
+        }
+    }
+    result
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -136,7 +207,7 @@ fn parse_run_args(args: &[String]) -> Result<RunArgs> {
 fn configure(args: &[String]) -> Result<()> {
     let parsed = parse_configure_args(args)?;
     let mut cfg = Config::load().unwrap_or(Config::fresh(config::random_id()?));
-    match parsed.allow_repos {
+    match next_allow_repos(&cfg.allow_repos, &parsed) {
         Some(allow_repos) => cfg.allow_repos = allow_repos,
         None => {
             if let Some(chosen) = choose_allow_repos(&cfg)? {
@@ -337,6 +408,38 @@ fn status() -> Result<()> {
     for route in routes {
         println!("  {}", route.label);
     }
+    // A destination file that cannot upload is worth naming: without this a
+    // half-filled file looks the same as a repository that was never set up.
+    let found = repos_with_destination(&cfg);
+    let blocked: Vec<&Found> = found.iter().filter(|repo| repo.blocked.is_some()).collect();
+    if blocked.is_empty() {
+        println!("blocked repos : none — every destination file is usable");
+    } else {
+        println!("blocked repos :");
+        for repo in blocked {
+            let reason = repo.blocked.as_deref().unwrap_or("blocked");
+            println!("  {} ({reason})", leaf(&repo.path));
+        }
+    }
+    // An allow-list entry that names no repository with a destination file is a
+    // typo or a checkout that moved, and would otherwise upload nothing quietly.
+    let orphans: Vec<&str> = cfg
+        .allow_repos
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .filter(|entry| {
+            !found
+                .iter()
+                .any(|repo| destination::workspace_allowed(&repo.path, &[entry.to_string()]))
+        })
+        .collect();
+    if !orphans.is_empty() {
+        println!("allowed but no destination found:");
+        for entry in orphans {
+            println!("  {entry}");
+        }
+    }
     let offsets = Offsets::load();
     println!("tracked files: {}", offsets.len());
     let spool = Spool::open();
@@ -361,7 +464,7 @@ fn run_once(args: &[String]) -> Result<()> {
     let srcs = sources::discover();
     let mut offsets = Offsets::load();
     let spool = Spool::open();
-    let pass = scan_and_ship(&cfg, &srcs, &mut offsets, &spool);
+    let pass = scan_and_ship(&cfg, &srcs, &mut offsets, &spool, parsed.all_logs);
     if !report(pass, &cfg.allow_repos, parsed.all_logs) {
         log::idle(offsets.len(), spool.pending());
     }
@@ -427,7 +530,7 @@ fn watch(args: &[String]) -> Result<()> {
 
     // Catch up on anything appended while we were stopped.
     report(
-        scan_and_ship(&cfg, &srcs, &mut offsets, &spool),
+        scan_and_ship(&cfg, &srcs, &mut offsets, &spool, parsed.all_logs),
         &cfg.allow_repos,
         parsed.all_logs,
     );
@@ -443,7 +546,7 @@ fn watch(args: &[String]) -> Result<()> {
                 std::thread::sleep(Duration::from_millis(300));
                 while rx.try_recv().is_ok() {}
                 if report(
-                    scan_and_ship(&cfg, &srcs, &mut offsets, &spool),
+                    scan_and_ship(&cfg, &srcs, &mut offsets, &spool, parsed.all_logs),
                     &cfg.allow_repos,
                     parsed.all_logs,
                 ) {
@@ -453,7 +556,7 @@ fn watch(args: &[String]) -> Result<()> {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Fallback pass: covers missed events and retries the spool.
                 if report(
-                    scan_and_ship(&cfg, &srcs, &mut offsets, &spool),
+                    scan_and_ship(&cfg, &srcs, &mut offsets, &spool, parsed.all_logs),
                     &cfg.allow_repos,
                     parsed.all_logs,
                 ) {
@@ -536,6 +639,7 @@ fn scan_and_ship(
     srcs: &[sources::Source],
     offsets: &mut Offsets,
     spool: &Spool,
+    all_logs: bool,
 ) -> Pass {
     let mut observer: Vec<log::Activity> = Vec::new();
     match spool.quarantine_legacy() {
@@ -590,7 +694,7 @@ fn scan_and_ship(
             observer.push(line);
         }
     }
-    let drained = drain(cfg, spool);
+    let drained = drain(cfg, spool, all_logs);
     for (label, uploaded) in &drained {
         for (tool, count) in &uploaded.by_tool {
             if *count > 0 {
@@ -634,54 +738,239 @@ struct DrainResult {
     means: Option<(log::Tone, String)>,
 }
 
-/// Drain each customer independently so one blocked route cannot stall others.
-fn drain(cfg: &Config, spool: &Spool) -> BTreeMap<String, DrainResult> {
-    let mut by_label: BTreeMap<String, DrainResult> = BTreeMap::new();
-    for queued in spool.routes() {
-        if !destination::route_allowed(&queued.route, &cfg.allow_repos) {
-            continue;
-        }
-        let mut by_tool: BTreeMap<String, usize> = BTreeMap::new();
-        let mut means = None;
-        loop {
-            let batch = match spool.peek(&queued.route, cfg.batch) {
-                Ok(batch) => batch,
-                Err(_) => {
-                    means = Some((log::Tone::Error, "A queued file is unreadable".to_string()));
-                    break;
-                }
-            };
-            if batch.is_empty() {
-                break;
-            }
-            match uploader::send(&cfg.device_id, &queued.route, &batch) {
-                uploader::Upload::Ok => {
-                    if spool.drop_front(&queued.route, batch.len()).is_err() {
-                        means = Some((
-                            log::Tone::Error,
-                            "Send worked, local delete failed".to_string(),
-                        ));
-                        break;
+/// Bytes of JSON one request may carry. An ingest endpoint commonly refuses a
+/// body over 1 MiB, and 400 captured lines average just past that edge. The
+/// byte ceiling, not the record count, is what a batch has to respect.
+const PAYLOAD_BUDGET: usize = 900 * 1024;
+
+/// Smallest budget a size refusal may drive a route down to. Below this it is
+/// the front record, not the batch, that the server will not take.
+const MIN_PAYLOAD_BUDGET: usize = 32 * 1024;
+
+/// How long one drain may run before the pass returns to capturing. Long enough
+/// for every route to take many turns, short enough that new lines on disk do
+/// not sit unread.
+const DRAIN_BUDGET: Duration = Duration::from_secs(120);
+
+/// One customer's place in the round robin.
+struct Lane {
+    route: destination::RouteRef,
+    /// Bytes this route may put in one request. Halves on a size refusal.
+    budget: usize,
+    delivered: BTreeMap<String, usize>,
+    means: Option<(log::Tone, String)>,
+}
+
+/// What one batch did, so the round robin knows what the lane needs next.
+enum Turn {
+    Sent(BTreeMap<String, usize>),
+    Empty,
+    /// The server refused the size. Halve the budget and take another turn.
+    Smaller,
+    /// One record no batch size can carry. Parked, so the queue can move.
+    Parked(String),
+    Stop(log::Tone, String),
+}
+
+/// Give every customer a turn every cycle until the queues empty or the pass
+/// budget runs out. Draining one route to the bottom before starting the next
+/// starved every customer whose label sorted later.
+fn drain(cfg: &Config, spool: &Spool, all_logs: bool) -> BTreeMap<String, DrainResult> {
+    let deadline = std::time::Instant::now() + DRAIN_BUDGET;
+    // Live destinations on the machine, used to re-point a queue whose pinned
+    // file died at a sibling checkout carrying the same key.
+    let workspaces = workspace::WorkspaceIndex::discover(&cfg.search_roots);
+    let candidates = destination::discover_routes(workspaces.candidates(), &cfg.allow_repos);
+    let mut lanes: Vec<Lane> = spool
+        .routes()
+        .into_iter()
+        .filter(|queued| destination::route_allowed(&queued.route, &cfg.allow_repos))
+        .map(|queued| Lane {
+            route: queued.route,
+            budget: PAYLOAD_BUDGET,
+            delivered: BTreeMap::new(),
+            means: None,
+        })
+        .collect();
+
+    let mut done: Vec<Lane> = Vec::new();
+    let mut cycle = 0usize;
+    while !lanes.is_empty() && std::time::Instant::now() < deadline {
+        // One batch per route, all routes at once.
+        let candidates = &candidates;
+        let turns: Vec<Turn> = std::thread::scope(|scope| {
+            let handles: Vec<_> = lanes
+                .iter()
+                .map(|lane| scope.spawn(move || one_batch(cfg, spool, candidates, lane)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or(Turn::Stop(
+                        log::Tone::Error,
+                        "An upload thread died".to_string(),
+                    ))
+                })
+                .collect()
+        });
+
+        let mut progress: Vec<log::Activity> = Vec::new();
+        let mut active: Vec<Lane> = Vec::new();
+        for (mut lane, turn) in lanes.into_iter().zip(turns) {
+            let mut keep = true;
+            match turn {
+                Turn::Sent(by_tool) => {
+                    let sent: usize = by_tool.values().sum();
+                    for (tool, count) in by_tool {
+                        *lane.delivered.entry(tool).or_default() += count;
                     }
-                    for record in &batch {
-                        *by_tool.entry(record.tool.clone()).or_default() += 1;
+                    if cycle > 0 {
+                        // The first cycle already reads as the end-of-pass line.
+                        // A drain that runs for minutes should not stay silent
+                        // until it is over.
+                        progress.push(progress_line(&lane, sent, spool.pending_for(&lane.route)));
                     }
                 }
-                uploader::Upload::Retry(reason) => {
-                    means = Some((log::Tone::Warning, reason));
-                    break;
+                Turn::Empty => keep = false,
+                Turn::Smaller => lane.budget = (lane.budget / 2).max(MIN_PAYLOAD_BUDGET),
+                Turn::Parked(reason) => {
+                    lane.budget = PAYLOAD_BUDGET;
+                    lane.means = Some((log::Tone::Warning, reason));
                 }
-                uploader::Upload::Blocked(reason) => {
-                    means = Some((log::Tone::Error, reason));
-                    break;
+                Turn::Stop(tone, reason) => {
+                    lane.means = Some((tone, reason));
+                    keep = false;
                 }
             }
+            if keep {
+                active.push(lane);
+            } else {
+                done.push(lane);
+            }
         }
-        if !by_tool.is_empty() || means.is_some() {
-            by_label.insert(queued.route.label.clone(), DrainResult { by_tool, means });
+        if !progress.is_empty() {
+            log::activities(&log::for_display(progress, &cfg.allow_repos, all_logs));
+        }
+        lanes = active;
+        cycle += 1;
+    }
+    done.extend(lanes);
+
+    done.into_iter()
+        .filter(|lane| !lane.delivered.is_empty() || lane.means.is_some())
+        .map(|lane| {
+            (
+                lane.route.label.clone(),
+                DrainResult {
+                    by_tool: lane.delivered,
+                    means: lane.means,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The key for a queue, and the path to record if the pinned file was replaced.
+/// The pinned file is tried first; only when it stops producing credentials does
+/// a discovered destination with the same identity stand in for it.
+fn resolve_credentials(
+    route: &destination::RouteRef,
+    candidates: &[destination::RouteRef],
+) -> Result<(String, Option<PathBuf>), String> {
+    if let Ok(credentials) = destination::read_credentials(route) {
+        return Ok((credentials.api_key, None));
+    }
+    for candidate in candidates {
+        if destination::same_identity(candidate, route) {
+            if let Ok(credentials) = destination::read_credentials(candidate) {
+                return Ok((credentials.api_key, Some(candidate.credential_path.clone())));
+            }
         }
     }
-    by_label
+    Err("Dest file gone and no repo with the same key was found".to_string())
+}
+
+/// One route's turn: send the front of its queue once.
+fn one_batch(
+    cfg: &Config,
+    spool: &Spool,
+    candidates: &[destination::RouteRef],
+    lane: &Lane,
+) -> Turn {
+    // Once the budget is at its floor, send one record per request. The next
+    // refusal then names the record itself rather than the batch around it,
+    // which is the only way a route with an unsendable line keeps moving.
+    let max_records = if lane.budget <= MIN_PAYLOAD_BUDGET {
+        1
+    } else {
+        cfg.batch
+    };
+    let batch = match spool.peek_batch(&lane.route, max_records, lane.budget) {
+        Ok(batch) => batch,
+        Err(_) => return Turn::Stop(log::Tone::Error, "A queued file is unreadable".to_string()),
+    };
+    if batch.is_empty() {
+        return Turn::Empty;
+    }
+
+    // The key that reaches this queue. If the file it was pinned to no longer
+    // produces one, deliver through a sibling checkout that carries the same
+    // identity rather than stranding the queue behind a repurposed file.
+    let (api_key, repointed) = match resolve_credentials(&lane.route, candidates) {
+        Ok(pair) => pair,
+        Err(reason) => return Turn::Stop(log::Tone::Error, reason),
+    };
+    if let Some(path) = &repointed {
+        let _ = spool.repoint(&lane.route, path);
+    }
+
+    // Establish the organization from the key, enforcing any already bound to
+    // the queue, and pin it the first time a queue that carried none resolves.
+    let org = match uploader::resolve_org(&lane.route, &api_key) {
+        uploader::OrgOutcome::Resolved(org) => org,
+        uploader::OrgOutcome::Retry(reason) => return Turn::Stop(log::Tone::Warning, reason),
+        uploader::OrgOutcome::Blocked(reason) => return Turn::Stop(log::Tone::Error, reason),
+    };
+    if lane.route.org_id.is_none() {
+        let _ = spool.pin_org(&lane.route, &org);
+    }
+
+    match uploader::post_batch(&cfg.device_id, &lane.route, &api_key, &org, &batch) {
+        uploader::Upload::Ok => {
+            if spool.drop_front(&lane.route, batch.len()).is_err() {
+                return Turn::Stop(
+                    log::Tone::Error,
+                    "Send worked, local delete failed".to_string(),
+                );
+            }
+            let mut by_tool: BTreeMap<String, usize> = BTreeMap::new();
+            for record in &batch {
+                *by_tool.entry(record.tool.clone()).or_default() += 1;
+            }
+            Turn::Sent(by_tool)
+        }
+        uploader::Upload::TooLarge(reason) => {
+            if batch.len() > 1 {
+                return Turn::Smaller;
+            }
+            // A single record the server refuses at any size. Park it, or the
+            // whole customer queue stops behind one line.
+            match spool.quarantine_front(&lane.route) {
+                Ok(()) => Turn::Parked(format!("One record was too big to send · {reason}")),
+                Err(_) => Turn::Stop(log::Tone::Error, reason),
+            }
+        }
+        uploader::Upload::Retry(reason) => Turn::Stop(log::Tone::Warning, reason),
+        uploader::Upload::Blocked(reason) => Turn::Stop(log::Tone::Error, reason),
+    }
+}
+
+/// What one route has delivered so far, printed while the drain is still going.
+fn progress_line(lane: &Lane, sent: usize, queued: usize) -> log::Activity {
+    let mut line = log::Activity::new(lane.route.label.as_str());
+    line.uploaded = sent;
+    line.queued = queued;
+    line
 }
 
 fn docs_cmd(args: &[String]) -> Result<()> {
@@ -863,9 +1152,370 @@ fn clear_queue(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
+    }
+
+    fn stamp() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    }
+
+    /// A customer endpoint that answers the identity check once, then accepts
+    /// `ingests` batches, writing the label of every batch it takes into the
+    /// shared arrival order.
+    fn spawn_customer(
+        label: &'static str,
+        org_id: String,
+        ingests: usize,
+        order: Arc<Mutex<Vec<&'static str>>>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            for _ in 0..ingests + 1 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut data = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let Ok(count) = stream.read(&mut chunk) else {
+                        return;
+                    };
+                    if count == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&data[..end + 4]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let request = String::from_utf8_lossy(&data).to_string();
+                if request.starts_with("POST /ingest") {
+                    order.lock().unwrap().push(label);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 204 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                } else {
+                    let body = format!("{{\"organizationId\":\"{org_id}\"}}");
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            }
+        });
+        (origin, handle)
+    }
+
+    fn customer_route(root: &Path, label: &'static str, origin: &str) -> destination::RouteRef {
+        let repo = root.join(label);
+        std::fs::create_dir_all(&repo).unwrap();
+        let env_path = repo.join("env.khotan.local");
+        std::fs::write(
+            &env_path,
+            format!(
+                "KHOTAN_API_URL='{origin}'\nKHOTAN_API_KEY='test-secret-key'\nKHOTAN_ORG_ID='org-{label}'\n"
+            ),
+        )
+        .unwrap();
+        destination::RouteRef {
+            id: format!("route-{label}"),
+            org_id: Some(format!("org-{label}")),
+            api_url: origin.to_string(),
+            key_fingerprint: Some(destination::key_fingerprint("test-secret-key")),
+            credential_path: env_path,
+            label: label.to_string(),
+        }
+    }
+
+    fn queued(line: &str) -> record::Record {
+        record::Record {
+            schema: "v1".into(),
+            tool: "cursor".into(),
+            project: "customer".into(),
+            session_id: "session".into(),
+            thread_id: None,
+            agent_role: None,
+            seq: None,
+            captured_at_ms: 1,
+            line: line.into(),
+        }
+    }
+
+    /// The bug this replaced: routes were drained one at a time in label order,
+    /// so a customer that never emptied kept every later customer at zero.
+    #[test]
+    fn every_route_gets_a_turn_before_the_first_one_finishes() {
+        let root = std::env::temp_dir().join(format!("hmc-drain-{}", stamp()));
+        std::fs::create_dir_all(&root).unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (first_origin, first_server) = spawn_customer(
+            "aaa-sorts-first",
+            "org-aaa-sorts-first".into(),
+            3,
+            Arc::clone(&order),
+        );
+        let (last_origin, last_server) = spawn_customer(
+            "zzz-sorts-last",
+            "org-zzz-sorts-last".into(),
+            1,
+            Arc::clone(&order),
+        );
+        let first = customer_route(&root, "aaa-sorts-first", &first_origin);
+        let last = customer_route(&root, "zzz-sorts-last", &last_origin);
+
+        let spool = Spool::at(root.join("state"));
+        spool
+            .append(
+                &first,
+                &[
+                    queued("a"),
+                    queued("b"),
+                    queued("c"),
+                    queued("d"),
+                    queued("e"),
+                    queued("f"),
+                ],
+            )
+            .unwrap();
+        spool.append(&last, &[queued("z"), queued("y")]).unwrap();
+
+        let cfg = Config {
+            endpoint: None,
+            token: None,
+            device_id: "device".into(),
+            poll_secs: 45,
+            batch: 2,
+            search_roots: vec![root.clone()],
+            allow_repos: vec!["aaa-sorts-first".into(), "zzz-sorts-last".into()],
+        };
+        let drained = drain(&cfg, &spool, false);
+
+        first_server.join().unwrap();
+        last_server.join().unwrap();
+        let order = order.lock().unwrap().clone();
+        let last_batch_of_first = order
+            .iter()
+            .rposition(|label| *label == "aaa-sorts-first")
+            .unwrap();
+        let only_batch_of_last = order
+            .iter()
+            .position(|label| *label == "zzz-sorts-last")
+            .unwrap();
+        assert!(
+            only_batch_of_last < last_batch_of_first,
+            "the later label waited for the earlier one to empty: {order:?}"
+        );
+        assert_eq!(drained["aaa-sorts-first"].by_tool["cursor"], 6);
+        assert_eq!(drained["zzz-sorts-last"].by_tool["cursor"], 2);
+        assert_eq!(spool.pending(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn read_meta(state: &Path, id: &str) -> serde_json::Value {
+        let raw = std::fs::read_to_string(state.join("spool").join(id).join("route.json")).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn a_route_with_no_declared_org_pins_the_one_the_key_resolves_to() {
+        let root = std::env::temp_dir().join(format!("hmc-pin-{}", stamp()));
+        std::fs::create_dir_all(&root).unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (origin, server) = spawn_customer("pin-me", "org-resolved".into(), 1, order);
+        let mut route = customer_route(&root, "pin-me", &origin);
+        // The destination declared no organization when the queue was created.
+        route.org_id = None;
+
+        let state = root.join("state");
+        let spool = Spool::at(state.clone());
+        spool.append(&route, &[queued("a")]).unwrap();
+
+        let cfg = Config {
+            endpoint: None,
+            token: None,
+            device_id: "device".into(),
+            poll_secs: 45,
+            batch: 200,
+            search_roots: vec![root.clone()],
+            allow_repos: vec!["pin-me".into()],
+        };
+        let drained = drain(&cfg, &spool, false);
+
+        server.join().unwrap();
+        assert_eq!(drained["pin-me"].by_tool["cursor"], 1);
+        assert_eq!(spool.pending(), 0);
+        // The endpoint's organization was pinned into the queue's metadata.
+        let meta = read_meta(&state, "route-pin-me");
+        assert_eq!(meta["route"]["org_id"].as_str(), Some("org-resolved"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_declared_org_that_the_key_contradicts_blocks_and_keeps_the_records() {
+        let root = std::env::temp_dir().join(format!("hmc-declared-{}", stamp()));
+        std::fs::create_dir_all(&root).unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        // customer_route declares org-declared-mismatch; the key resolves to another.
+        let (origin, server) = spawn_customer("declared-mismatch", "org-other".into(), 0, order);
+        let route = customer_route(&root, "declared-mismatch", &origin);
+
+        let state = root.join("state");
+        let spool = Spool::at(state.clone());
+        spool.append(&route, &[queued("a")]).unwrap();
+
+        let cfg = Config {
+            endpoint: None,
+            token: None,
+            device_id: "device".into(),
+            poll_secs: 45,
+            batch: 200,
+            search_roots: vec![root.clone()],
+            allow_repos: vec!["declared-mismatch".into()],
+        };
+        let drained = drain(&cfg, &spool, false);
+
+        server.join().unwrap();
+        assert!(drained["declared-mismatch"].means.is_some());
+        assert!(drained["declared-mismatch"].by_tool.is_empty());
+        assert_eq!(spool.pending(), 1, "the records stay queued");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_key_swapped_after_pinning_blocks_rather_than_delivering_to_the_new_org() {
+        let root = std::env::temp_dir().join(format!("hmc-pinned-{}", stamp()));
+        std::fs::create_dir_all(&root).unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (origin, server) = spawn_customer("pinned", "org-endpoint".into(), 0, order);
+        let mut route = customer_route(&root, "pinned", &origin);
+        route.org_id = None;
+
+        let state = root.join("state");
+        let spool = Spool::at(state.clone());
+        spool.append(&route, &[queued("a")]).unwrap();
+        // An earlier pass pinned a different organization to this queue.
+        spool.pin_org(&route, "org-was-pinned").unwrap();
+
+        let cfg = Config {
+            endpoint: None,
+            token: None,
+            device_id: "device".into(),
+            poll_secs: 45,
+            batch: 200,
+            search_roots: vec![root.clone()],
+            allow_repos: vec!["pinned".into()],
+        };
+        let drained = drain(&cfg, &spool, false);
+
+        server.join().unwrap();
+        assert!(drained["pinned"].means.is_some());
+        assert_eq!(spool.pending(), 1, "records stay behind the mismatch");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_repurposed_file_delivers_through_a_sibling_that_holds_the_same_key() {
+        let root = std::env::temp_dir().join(format!("hmc-repoint-{}", stamp()));
+        std::fs::create_dir_all(&root).unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (origin, server) = spawn_customer("acme", "org-acme".into(), 1, Arc::clone(&order));
+
+        // The file the queue was pinned to, now repurposed: no Khotan keys left.
+        let dead_repo = root.join("acme-dead");
+        std::fs::create_dir_all(dead_repo.join(".git")).unwrap();
+        let dead_env = dead_repo.join("env.khotan.local");
+        std::fs::write(&dead_env, "SOME_OTHER_TOOL=1\n").unwrap();
+
+        // A sibling checkout that still carries the same origin and key.
+        let live_repo = root.join("acme-live");
+        std::fs::create_dir_all(live_repo.join(".git")).unwrap();
+        let live_env = live_repo.join("env.khotan.local");
+        std::fs::write(
+            &live_env,
+            format!(
+                "KHOTAN_API_URL='{origin}'\nKHOTAN_API_KEY='shared-key'\nKHOTAN_ORG_ID='org-acme'\n"
+            ),
+        )
+        .unwrap();
+
+        // A queue pinned to the dead file, identified by the shared key.
+        let queue_route = destination::RouteRef {
+            id: "acme-queue".into(),
+            org_id: Some("org-acme".into()),
+            api_url: origin.clone(),
+            key_fingerprint: Some(destination::key_fingerprint("shared-key")),
+            credential_path: dead_env.clone(),
+            label: "acme-dead".into(),
+        };
+        let state = root.join("state");
+        let spool = Spool::at(state.clone());
+        spool.append(&queue_route, &[queued("stranded")]).unwrap();
+
+        let cfg = Config {
+            endpoint: None,
+            token: None,
+            device_id: "device".into(),
+            poll_secs: 45,
+            batch: 200,
+            search_roots: vec![root.clone()],
+            allow_repos: vec!["acme-dead".into(), "acme-live".into()],
+        };
+        let drained = drain(&cfg, &spool, false);
+
+        server.join().unwrap();
+        assert_eq!(drained["acme-dead"].by_tool["cursor"], 1);
+        assert_eq!(spool.pending(), 0, "the stranded record was delivered");
+        // The queue now points at the live sibling's file.
+        let meta = read_meta(&state, "acme-queue");
+        assert_eq!(meta["route"]["credential_path"].as_str(), live_env.to_str());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_queue_with_no_working_file_reports_a_reason_and_keeps_its_records() {
+        let dead = destination::RouteRef {
+            id: "q".into(),
+            org_id: Some("org".into()),
+            api_url: "https://acme.example".into(),
+            key_fingerprint: Some(destination::key_fingerprint("shared-key")),
+            credential_path: PathBuf::from("/nonexistent/dead.env"),
+            label: "acme".into(),
+        };
+        // A candidate at the same origin, but a different key: not a match.
+        let stranger = destination::RouteRef {
+            id: "other".into(),
+            org_id: Some("org".into()),
+            api_url: "https://acme.example".into(),
+            key_fingerprint: Some(destination::key_fingerprint("different-key")),
+            credential_path: PathBuf::from("/nonexistent/other.env"),
+            label: "other".into(),
+        };
+        let outcome = resolve_credentials(&dead, &[stranger]);
+        assert!(outcome.is_err(), "nothing matches, so the queue is blocked");
     }
 
     #[test]
@@ -890,6 +1540,84 @@ mod tests {
                 "chief-nutrition".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn parse_configure_add_and_remove() {
+        let parsed = parse_configure_args(&s(&[
+            "--add-repo",
+            "alpha",
+            "--remove-repo",
+            "beta",
+            "--add-repo",
+            "gamma",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.allow_repos, None);
+        assert_eq!(parsed.add_repos, vec!["alpha", "gamma"]);
+        assert_eq!(parsed.remove_repos, vec!["beta"]);
+    }
+
+    #[test]
+    fn parse_configure_rejects_replace_mixed_with_adjust() {
+        let err =
+            parse_configure_args(&s(&["--allow-repo", "alpha", "--add-repo", "beta"])).unwrap_err();
+        assert!(err.to_string().contains("--allow-repo"), "{err}");
+    }
+
+    #[test]
+    fn adjusting_the_list_adds_removes_and_no_ops_without_disturbing_the_rest() {
+        let existing = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        // Add one to a list of three: four entries, the original three intact.
+        let added = next_allow_repos(
+            &existing,
+            &ConfigureArgs {
+                add_repos: vec!["four".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(added, vec!["one", "two", "three", "four"]);
+        // Remove one: only that entry is gone.
+        let removed = next_allow_repos(
+            &existing,
+            &ConfigureArgs {
+                remove_repos: vec!["two".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(removed, vec!["one", "three"]);
+        // Both in one command.
+        let both = next_allow_repos(
+            &existing,
+            &ConfigureArgs {
+                add_repos: vec!["four".into()],
+                remove_repos: vec!["one".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(both, vec!["two", "three", "four"]);
+        // A duplicate add and an absent remove each change nothing.
+        assert_eq!(merge_allow(&existing, &["TWO".into()], &[]), existing);
+        assert_eq!(merge_allow(&existing, &[], &["absent".into()]), existing);
+    }
+
+    #[test]
+    fn the_replace_form_still_replaces() {
+        let existing = vec!["one".to_string(), "two".to_string()];
+        let replaced = next_allow_repos(
+            &existing,
+            &ConfigureArgs {
+                allow_repos: Some(vec!["only".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(replaced, vec!["only"]);
+        // No list flags: the picker decides, so nothing is returned here.
+        assert_eq!(next_allow_repos(&existing, &ConfigureArgs::default()), None);
     }
 
     #[test]

@@ -34,8 +34,16 @@ fn default_poll_secs() -> u64 {
     45
 }
 
+/// Records per request. The real ceiling on a batch is bytes, not lines; this
+/// only keeps a burst of small lines from building an unbounded request.
 fn default_batch() -> usize {
-    200
+    2000
+}
+
+/// `batch` is a preset. Installs carry ceilings from before the uploader sized a
+/// request in bytes, and those numbers now only cap throughput.
+fn preset_batch(stored: usize) -> usize {
+    stored.max(default_batch())
 }
 
 pub fn default_search_roots() -> Vec<PathBuf> {
@@ -60,7 +68,8 @@ impl Config {
         fs::File::open(&path)
             .with_context(|| format!("no config at {} — run `hmc enroll` first", path.display()))?
             .read_to_string(&mut s)?;
-        let cfg: Config = toml::from_str(&s).context("config.toml is malformed")?;
+        let mut cfg: Config = toml::from_str(&s).context("config.toml is malformed")?;
+        cfg.batch = preset_batch(cfg.batch);
         Ok(cfg)
     }
 
@@ -169,6 +178,13 @@ batch = 20
         let saved = toml::to_string(&cfg).unwrap();
         assert!(!saved.contains("old.example"));
         assert!(!saved.contains("old-secret"));
+    }
+
+    #[test]
+    fn a_stale_batch_ceiling_moves_up_to_the_preset() {
+        assert_eq!(preset_batch(200), default_batch());
+        assert_eq!(preset_batch(600), default_batch());
+        assert_eq!(preset_batch(default_batch() * 2), default_batch() * 2);
     }
 
     #[test]
