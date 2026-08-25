@@ -2,6 +2,14 @@
 
 Agent brief for `harness-message-capture`. Humans read `README.md`.
 
+> **Where this lives.** Development happens in the Khotan platform monorepo at
+> `tools/harness-message-capture/`, imported there with `git subtree add`. The
+> `khotan-core/harness-message-capture` repository remains the **release home**:
+> `dist/install.sh` is curl'd from its `main`, `khotan-observer update` resolves
+> against its GitHub Releases, and `.github/workflows/release.yml` runs there on
+> a `v*` tag. Changes reach it by a subtree push from the monorepo, so a change
+> is not released until it lands here and a tag is cut.
+
 ## Project overview
 
 macOS background agent that tails local AI coding-agent transcripts (Cursor, Claude Code, Codex), redacts secrets on device, and POSTs redacted lines to the Khotan organization pinned by each customer repository.
