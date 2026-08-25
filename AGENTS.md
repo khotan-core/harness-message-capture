@@ -3,12 +3,18 @@
 Agent brief for `harness-message-capture`. Humans read `README.md`.
 
 > **Where this lives.** Development happens in the Khotan platform monorepo at
-> `tools/harness-message-capture/`, imported there with `git subtree add`. The
-> `khotan-core/harness-message-capture` repository remains the **release home**:
-> `dist/install.sh` is curl'd from its `main`, `khotan-observer update` resolves
-> against its GitHub Releases, and `.github/workflows/release.yml` runs there on
-> a `v*` tag. Changes reach it by a subtree push from the monorepo, so a change
-> is not released until it lands here and a tag is cut.
+> `tools/harness-message-capture/`, imported there with `git subtree add`. This
+> repository is a **published mirror**: a merge to the monorepo's `main`
+> automatically splits the prefix and fast-forwards `main` here. Do not commit
+> to this repository directly — an upstream commit the monorepo does not have
+> (a release bump is the likely one) makes the next publish fail its ancestry
+> check rather than force-push over you.
+>
+> It remains the **release home**: `dist/install.sh` is curl'd from this `main`,
+> `khotan-observer update` resolves against these GitHub Releases, and
+> `.github/workflows/release.yml` runs here on a `v*` tag. Publishing is not
+> releasing — bump the version in the monorepo, let the merge publish it, then
+> tag here to ship binaries.
 
 ## Project overview
 
